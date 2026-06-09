@@ -5,6 +5,14 @@ A minimal self-hosted web UI for managing MEGAcmd downloads. Runs as a Docker co
 Designed for homelab use — accessed over Tailscale, no authentication required.
 
 ![Node 20](https://img.shields.io/badge/node-20--alpine-brightgreen)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+![MEGAcmd 2.5.2.1](https://img.shields.io/badge/MEGAcmd-2.5.2.1-orange)
+
+## Security
+
+> **This tool has no authentication.** It is designed to run on a private network (e.g. Tailscale) only. **Do not expose port 8085 to the public internet** — anyone who can reach it can queue downloads, cancel transfers, and interact with your MEGAcmd instance.
+
+> **The Docker socket mount grants significant host access.** Mounting `/var/run/docker.sock` allows the container to execute commands against any container on the host. This is the same tradeoff made by tools like Portainer. Only deploy this on a host you control and trust.
 
 ## Features
 
@@ -111,8 +119,16 @@ MOCK=1 node server.js
 
 Open `http://localhost:8085`. In mock mode the server returns fake transfers covering all states (downloading, paused, queued, error, uploading) and actions like pause/resume/cancel update the in-memory state — so the UI is fully interactive without a real MEGAcmd instance.
 
+## Compatibility
+
+Tested with MEGAcmd **2.5.2.1**. The transfer parser uses `--col-separator=|` and reads column names from the header row, so it should adapt to other versions automatically. If you run a different version and hit parsing issues, open an issue with the output of `mega-transfers --limit=5 --col-separator=|`.
+
 ## Tech Stack
 
 - **Backend:** Node.js + Express
 - **Frontend:** Single HTML file — vanilla JS, no framework, no build step
 - **Dependencies:** `express`, `cors` only
+
+## License
+
+[MIT](LICENSE)
