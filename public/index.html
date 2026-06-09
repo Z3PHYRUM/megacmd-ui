@@ -8,15 +8,15 @@
   <link rel="icon" type="image/png" href="/images/logo_big.png">
   <style>
     :root {
-      --bg:      #0f1117;
-      --panel:   #1a1d27;
-      --border:  #2a2d3a;
-      --text:    #e4e6f0;
-      --muted:   #7a7d8e;
-      --accent:  #5c6bc0;
-      --success: #4caf50;
-      --error:   #f44336;
-      --warn:    #ff9800;
+      --bg:      #21222c;
+      --panel:   #282a36;
+      --border:  #44475a;
+      --text:    #f8f8f2;
+      --muted:   #6272a4;
+      --accent:  #bd93f9;
+      --success: #50fa7b;
+      --error:   #ff5555;
+      --warn:    #ffb86c;
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -114,7 +114,7 @@
       background: var(--accent);
       border: none;
       border-radius: 6px;
-      color: #fff;
+      color: var(--bg);
       cursor: pointer;
       font-size: 13px;
       font-weight: 600;
@@ -125,9 +125,9 @@
     button:hover  { opacity: 0.85; }
     button:active { opacity: 0.65; }
     button:disabled { opacity: 0.35; cursor: not-allowed; }
-    button.secondary { background: #37474f; }
-    button.success   { background: #2e7d32; }
-    button.danger    { background: #b71c1c; }
+    button.secondary { background: #44475a; color: var(--text); }
+    button.success   { background: var(--success); }
+    button.danger    { background: #cc2222; color: #fff; }
     button.sm        { font-size: 11px; padding: 4px 10px; }
     button.icon      { background: none; color: var(--muted); font-size: 15px;
                        line-height: 1; padding: 2px 5px; }
@@ -195,15 +195,15 @@
       text-transform: uppercase;
       white-space: nowrap;
     }
-    .badge.downloading { background: rgba(92,107,192,.22); color: #9fa8da; }
-    .badge.uploading   { background: rgba(0,150,136,.22);  color: #80cbc4; }
-    .badge.paused      { background: rgba(255,152,0,.22);  color: #ffcc80; }
+    .badge.downloading { background: rgba(189,147,249,.2);  color: #bd93f9; }
+    .badge.uploading   { background: rgba(139,233,253,.2);  color: #8be9fd; }
+    .badge.paused      { background: rgba(255,184,108,.2);  color: #ffb86c; }
     .badge.queued,
-    .badge.pending     { background: rgba(255,255,255,.1); color: var(--muted); }
-    .badge.retrying    { background: rgba(92,107,192,.22); color: #9fa8da; }
-    .badge.error       { background: rgba(244,67,54,.22);  color: #ef9a9a; }
-    .badge.complete    { background: rgba(76,175,80,.22);  color: #a5d6a7; }
-    .badge.unknown     { background: rgba(255,255,255,.08); color: var(--muted); }
+    .badge.pending     { background: rgba(255,255,255,.08); color: var(--muted); }
+    .badge.retrying    { background: rgba(189,147,249,.2);  color: #bd93f9; }
+    .badge.error       { background: rgba(255,85,85,.2);    color: #ff5555; }
+    .badge.complete    { background: rgba(80,250,123,.2);   color: #50fa7b; }
+    .badge.unknown     { background: rgba(255,255,255,.06); color: var(--muted); }
 
     .pbar-wrap { display: flex; align-items: center; gap: 8px; }
     .pbar {
@@ -238,23 +238,23 @@
     .transfer-stats .sep { margin: 0 8px; opacity: 0.35; }
 
     /* ── Download error panel ── */
-    .dl-errors { border-radius: 6px; border: 1px solid rgba(244,67,54,.35);
-                 background: rgba(244,67,54,.08); margin-top: 10px; overflow: hidden; }
+    .dl-errors { border-radius: 6px; border: 1px solid rgba(255,85,85,.35);
+                 background: rgba(255,85,85,.08); margin-top: 10px; overflow: hidden; }
     .dl-errors.hidden { display: none; }
     .dl-errors-header { display: flex; justify-content: space-between; align-items: center;
-                        padding: 7px 11px; font-size: 12px; font-weight: 600; color: #ef9a9a; }
+                        padding: 7px 11px; font-size: 12px; font-weight: 600; color: #ff5555; }
     .dl-errors-header button { background: none; border: none; color: var(--muted);
                                 cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; }
-    .dl-error-item { border-top: 1px solid rgba(244,67,54,.2); font-size: 12px;
+    .dl-error-item { border-top: 1px solid rgba(255,85,85,.2); font-size: 12px;
                      padding: 6px 11px; color: var(--muted); }
-    .dl-error-item strong { color: #ef9a9a; display: block; margin-bottom: 2px; }
+    .dl-error-item strong { color: #ff5555; display: block; margin-bottom: 2px; }
 
     /* ── Truncation warning ── */
     .truncation-warn {
-      background: rgba(255,152,0,.12);
-      border: 1px solid rgba(255,152,0,.35);
+      background: rgba(255,184,108,.12);
+      border: 1px solid rgba(255,184,108,.35);
       border-radius: 6px;
-      color: #ffcc80;
+      color: #ffb86c;
       font-size: 12px;
       margin-top: 10px;
       padding: 7px 11px;
@@ -269,7 +269,7 @@
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 6px;
-      color: #a0a8b8;
+      color: var(--muted);
       font-family: 'Courier New', monospace;
       font-size: 12px;
       height: 180px;
@@ -278,9 +278,9 @@
       white-space: pre-wrap;
       word-break: break-all;
     }
-    .history-log .log-downloaded { color: #a5d6a7; }
-    .history-log .log-queued     { color: #ffcc80; }
-    .history-log .log-failed     { color: #ef9a9a; }
+    .history-log .log-downloaded { color: #50fa7b; }
+    .history-log .log-queued     { color: #ffb86c; }
+    .history-log .log-failed     { color: #ff5555; }
     .history-log .log-removed    { color: var(--muted); }
     .history-empty { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
 
@@ -329,8 +329,8 @@
     .spinner {
       display: inline-block;
       width: 13px; height: 13px;
-      border: 2px solid rgba(255,255,255,0.3);
-      border-top-color: #fff;
+      border: 2px solid rgba(0,0,0,0.2);
+      border-top-color: currentColor;
       border-radius: 50%;
       animation: spin 0.55s linear infinite;
       margin-right: 7px;
