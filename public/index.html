@@ -47,7 +47,6 @@
     }
     .dot.online  { background: var(--success); }
     .dot.offline { background: var(--error); }
-
     #status-text { color: var(--muted); }
 
     /* ── Layout ── */
@@ -66,6 +65,15 @@
       border-radius: 8px;
       padding: 18px;
     }
+    .panel.hidden { display: none; }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .panel-header h2 { margin-bottom: 0; }
 
     .panel h2 {
       font-size: 11px;
@@ -73,7 +81,6 @@
       letter-spacing: 0.1em;
       text-transform: uppercase;
       color: var(--muted);
-      margin-bottom: 14px;
     }
 
     /* ── Form elements ── */
@@ -91,12 +98,7 @@
     textarea:focus, input[type="text"]:focus { outline: none; border-color: var(--accent); }
     textarea::placeholder, input::placeholder { color: var(--muted); }
 
-    .dl-row {
-      display: flex;
-      gap: 10px;
-      margin-top: 10px;
-      align-items: center;
-    }
+    .dl-row { display: flex; gap: 10px; margin-top: 10px; align-items: center; }
     .dl-row input { flex: 1; }
 
     /* ── Buttons ── */
@@ -117,10 +119,19 @@
     button:disabled { opacity: 0.35; cursor: not-allowed; }
     button.secondary { background: #37474f; }
     button.danger    { background: #b71c1c; }
-    button.sm { font-size: 11px; padding: 4px 10px; }
+    button.sm        { font-size: 11px; padding: 4px 10px; }
+    button.icon      { background: none; color: var(--muted); font-size: 15px;
+                       line-height: 1; padding: 2px 5px; }
+    button.icon:hover { color: var(--text); opacity: 1; }
 
     /* ── Toolbar ── */
-    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+      align-items: center;
+    }
 
     /* ── Table ── */
     .table-wrap {
@@ -156,6 +167,15 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    .link-cell {
+      max-width: 280px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      color: var(--muted);
+    }
 
     .badge {
       border-radius: 4px;
@@ -169,7 +189,9 @@
     .badge.downloading { background: rgba(92,107,192,.22); color: #9fa8da; }
     .badge.uploading   { background: rgba(0,150,136,.22);  color: #80cbc4; }
     .badge.paused      { background: rgba(255,152,0,.22);  color: #ffcc80; }
-    .badge.queued      { background: rgba(255,255,255,.1); color: var(--muted); }
+    .badge.queued,
+    .badge.pending     { background: rgba(255,255,255,.1); color: var(--muted); }
+    .badge.retrying    { background: rgba(92,107,192,.22); color: #9fa8da; }
     .badge.error       { background: rgba(244,67,54,.22);  color: #ef9a9a; }
     .badge.complete    { background: rgba(76,175,80,.22);  color: #a5d6a7; }
     .badge.unknown     { background: rgba(255,255,255,.08); color: var(--muted); }
@@ -183,12 +205,7 @@
       overflow: hidden;
       flex: 1;
     }
-    .pbar-fill {
-      background: var(--accent);
-      border-radius: 3px;
-      height: 100%;
-      transition: width 0.4s;
-    }
+    .pbar-fill { background: var(--accent); border-radius: 3px; height: 100%; transition: width 0.4s; }
     .pct { color: var(--muted); font-size: 12px; min-width: 34px; text-align: right; }
 
     .row-actions { display: flex; gap: 5px; }
@@ -197,44 +214,19 @@
 
     .refresh-hint { color: var(--muted); font-size: 12px; margin-top: 10px; text-align: right; }
 
-    .dl-errors {
-      border-radius: 6px;
-      border: 1px solid rgba(244,67,54,.35);
-      background: rgba(244,67,54,.08);
-      margin-top: 10px;
-      overflow: hidden;
-    }
+    /* ── Download error panel ── */
+    .dl-errors { border-radius: 6px; border: 1px solid rgba(244,67,54,.35);
+                 background: rgba(244,67,54,.08); margin-top: 10px; overflow: hidden; }
     .dl-errors.hidden { display: none; }
-    .dl-errors-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 7px 11px;
-      font-size: 12px;
-      font-weight: 600;
-      color: #ef9a9a;
-    }
-    .dl-errors-header button {
-      background: none;
-      border: none;
-      color: var(--muted);
-      cursor: pointer;
-      font-size: 16px;
-      line-height: 1;
-      padding: 0 2px;
-    }
-    .dl-error-item {
-      border-top: 1px solid rgba(244,67,54,.2);
-      font-size: 12px;
-      padding: 6px 11px;
-      color: var(--muted);
-    }
-    .dl-error-item strong {
-      color: #ef9a9a;
-      display: block;
-      margin-bottom: 2px;
-    }
+    .dl-errors-header { display: flex; justify-content: space-between; align-items: center;
+                        padding: 7px 11px; font-size: 12px; font-weight: 600; color: #ef9a9a; }
+    .dl-errors-header button { background: none; border: none; color: var(--muted);
+                                cursor: pointer; font-size: 16px; line-height: 1; padding: 0 2px; }
+    .dl-error-item { border-top: 1px solid rgba(244,67,54,.2); font-size: 12px;
+                     padding: 6px 11px; color: var(--muted); }
+    .dl-error-item strong { color: #ef9a9a; display: block; margin-bottom: 2px; }
 
+    /* ── Truncation warning ── */
     .truncation-warn {
       background: rgba(255,152,0,.12);
       border: 1px solid rgba(255,152,0,.35);
@@ -245,6 +237,40 @@
       padding: 7px 11px;
     }
     .truncation-warn.hidden { display: none; }
+
+    /* ── Retry queue ── */
+    .countdown { color: var(--muted); font-size: 12px; margin-left: auto; }
+
+    /* ── History ── */
+    .history-log {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: #a0a8b8;
+      font-family: 'Courier New', monospace;
+      font-size: 12px;
+      height: 180px;
+      overflow-y: auto;
+      padding: 10px 12px;
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .history-log .log-downloaded { color: #a5d6a7; }
+    .history-log .log-queued     { color: #ffcc80; }
+    .history-log .log-failed     { color: #ef9a9a; }
+    .history-log .log-removed    { color: var(--muted); }
+    .history-empty { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
+
+    .collapse-btn {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 1;
+      padding: 0;
+    }
+    .collapse-btn:hover { color: var(--text); opacity: 1; }
 
     /* ── Toasts ── */
     #toasts {
@@ -257,7 +283,6 @@
       z-index: 999;
       pointer-events: none;
     }
-
     .toast {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -270,6 +295,7 @@
     }
     .toast.success { border-color: var(--success); }
     .toast.error   { border-color: var(--error); }
+    .toast.warn    { border-color: var(--warn); }
 
     @keyframes slide-in {
       from { opacity: 0; transform: translateX(30px); }
@@ -327,6 +353,32 @@
     </div>
   </section>
 
+  <!-- Retry Queue (hidden when empty) -->
+  <section class="panel hidden" id="rq-panel">
+    <div class="panel-header">
+      <h2>Retry Queue</h2>
+    </div>
+    <div class="toolbar">
+      <button onclick="rqRetryNow()">Retry Now</button>
+      <button class="danger" onclick="rqClearAll()">Clear All</button>
+      <span class="countdown" id="rq-countdown"></span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Link</th>
+            <th>Dest</th>
+            <th>Status</th>
+            <th>Last Error</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="rq-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
   <!-- Transfer Manager -->
   <section class="panel">
     <h2>Transfer Manager</h2>
@@ -357,10 +409,25 @@
     </div>
     <div class="refresh-hint" id="refresh-hint">Auto-refreshes every 5 seconds</div>
   </section>
+
+  <!-- History -->
+  <section class="panel" id="history-panel">
+    <div class="panel-header">
+      <h2>History</h2>
+      <button class="collapse-btn" id="history-toggle" onclick="toggleHistory()" title="Collapse">▾</button>
+    </div>
+    <div id="history-body">
+      <div id="history-log" class="history-log"></div>
+      <div class="toolbar" style="margin-top:10px; margin-bottom:0;">
+        <button class="secondary sm" onclick="clearLog()">Clear Log</button>
+        <span style="color:var(--muted);font-size:12px;margin-left:auto" id="log-hint">Last 200 entries</span>
+      </div>
+    </div>
+  </section>
 </main>
 
 <script>
-  // ── Escape helpers ─────────────────────────────────────────────────────────
+  // ── Escape helpers ──────────────────────────────────────────────────────────
   function esc(s) {
     return String(s ?? '')
       .replace(/&/g, '&amp;')
@@ -369,7 +436,7 @@
       .replace(/"/g, '&quot;');
   }
 
-  // ── Toasts ─────────────────────────────────────────────────────────────────
+  // ── Toasts ──────────────────────────────────────────────────────────────────
   function toast(msg, type = 'success', ms = 4000) {
     const el = document.createElement('div');
     el.className = `toast ${type}`;
@@ -382,21 +449,20 @@
     }, ms);
   }
 
-  // ── Status bar ─────────────────────────────────────────────────────────────
+  // ── Status bar ──────────────────────────────────────────────────────────────
   async function checkStatus() {
     try {
       const { loggedIn, whoami } = await apiFetch('/api/status');
       document.getElementById('status-dot').className = `dot ${loggedIn ? 'online' : 'offline'}`;
       document.getElementById('status-text').textContent = loggedIn
-        ? `Logged in as ${whoami}`
-        : `Not logged in — ${whoami}`;
+        ? `Logged in as ${whoami}` : `Not logged in — ${whoami}`;
     } catch {
       document.getElementById('status-dot').className = 'dot offline';
       document.getElementById('status-text').textContent = 'MEGAcmd unreachable';
     }
   }
 
-  // ── Downloads ──────────────────────────────────────────────────────────────
+  // ── Downloads ───────────────────────────────────────────────────────────────
   async function queueDownloads() {
     const links = document.getElementById('links').value
       .split('\n').map(l => l.trim()).filter(Boolean);
@@ -412,14 +478,18 @@
         body: JSON.stringify({ links, dest: document.getElementById('dest').value }),
       });
 
-      const ok  = results.filter(r => r.success);
-      const bad = results.filter(r => !r.success);
+      const ok    = results.filter(r => r.success);
+      const quota = results.filter(r => r.quotaExceeded);
+      const bad   = results.filter(r => !r.success && !r.quotaExceeded);
 
-      if (ok.length) {
-        toast(`Queued ${ok.length} download${ok.length > 1 ? 's' : ''}`, 'success');
-        document.getElementById('links').value = '';
+      if (ok.length) toast(`Queued ${ok.length} download${ok.length > 1 ? 's' : ''}`, 'success');
+      if (quota.length) {
+        toast(`${quota.length} link${quota.length > 1 ? 's' : ''} added to retry queue (quota exceeded)`, 'warn', 6000);
+        loadQueue(); // show queue panel immediately
       }
       if (bad.length) showDlErrors(bad);
+
+      if (ok.length || quota.length) document.getElementById('links').value = '';
     } catch (err) {
       toast(`Request failed: ${err.message}`, 'error');
     } finally {
@@ -428,31 +498,12 @@
     }
   }
 
-  // ── Transfer actions ───────────────────────────────────────────────────────
-  async function transferAction(action, tag) {
-    try {
-      const data = await apiFetch(`/api/transfers/${action}`, {
-        method: 'POST',
-        body: JSON.stringify({ tag }),
-      });
-      if (data.success) {
-        const label = tag === 'all' ? 'all transfers' : `transfer ${tag}`;
-        toast(`${cap(action)}d ${label}`, 'success');
-        loadTransfers();
-      } else {
-        toast(data.error || `${cap(action)} failed`, 'error');
-      }
-    } catch (err) {
-      toast(`${cap(action)} failed: ${err.message}`, 'error');
-    }
-  }
-
+  // ── Download error panel ─────────────────────────────────────────────────--
   function showDlErrors(failures) {
     const panel = document.getElementById('dl-errors');
-    const body  = document.getElementById('dl-errors-body');
-    const title = document.getElementById('dl-errors-title');
-    title.textContent = `${failures.length} download${failures.length > 1 ? 's' : ''} failed`;
-    body.innerHTML = failures.map(r => `
+    document.getElementById('dl-errors-title').textContent =
+      `${failures.length} download${failures.length > 1 ? 's' : ''} failed`;
+    document.getElementById('dl-errors-body').innerHTML = failures.map(r => `
       <div class="dl-error-item">
         <strong>${esc(r.error)}</strong>
         ${esc(r.link)}
@@ -465,45 +516,55 @@
     document.getElementById('dl-errors-body').innerHTML = '';
   }
 
+  // ── Transfer actions ─────────────────────────────────────────────────────--
+  async function transferAction(action, tag) {
+    try {
+      const data = await apiFetch(`/api/transfers/${action}`, {
+        method: 'POST', body: JSON.stringify({ tag }),
+      });
+      if (data.success) {
+        toast(`${cap(action)}d ${tag === 'all' ? 'all transfers' : `transfer ${tag}`}`, 'success');
+        loadTransfers();
+      } else {
+        toast(data.error || `${cap(action)} failed`, 'error');
+      }
+    } catch (err) {
+      toast(`${cap(action)} failed: ${err.message}`, 'error');
+    }
+  }
+
   function bulkAction(action) { transferAction(action, 'all'); }
   function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
-  // ── Transfer table ─────────────────────────────────────────────────────────
+  // ── Transfer table ───────────────────────────────────────────────────────--
   function renderTransfers(transfers) {
     const tbody = document.getElementById('tbody');
     if (!transfers?.length) {
       tbody.innerHTML = '<tr><td colspan="6" class="empty">No active transfers</td></tr>';
       return;
     }
-
     tbody.innerHTML = transfers.map(t => {
-      const pct   = Math.min(parseFloat(t.progress) || 0, 100);
-      const size  = t.transferred && t.total ? `${t.transferred} / ${t.total}` : (t.total || '—');
+      const pct  = Math.min(parseFloat(t.progress) || 0, 100);
+      const size = t.transferred && t.total ? `${t.transferred} / ${t.total}` : (t.total || '—');
       const badge = t.status || 'unknown';
-      return `
-        <tr>
-          <td class="filename-cell" title="${esc(t.filename)}">${esc(t.filename)}</td>
-          <td><span class="badge ${esc(badge)}">${esc(badge)}</span></td>
-          <td>
-            <div class="pbar-wrap">
-              <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
-              <span class="pct">${pct.toFixed(0)}%</span>
-            </div>
-          </td>
-          <td style="color:var(--muted);white-space:nowrap">${esc(t.speed)}</td>
-          <td style="color:var(--muted);white-space:nowrap">${esc(size)}</td>
-          <td>
-            <div class="row-actions">
-              <button class="secondary sm" data-action="pause"  data-tag="${esc(t.tag)}">Pause</button>
-              <button class="secondary sm" data-action="resume" data-tag="${esc(t.tag)}">Resume</button>
-              <button class="danger sm"    data-action="cancel" data-tag="${esc(t.tag)}">Cancel</button>
-            </div>
-          </td>
-        </tr>`;
+      return `<tr>
+        <td class="filename-cell" title="${esc(t.filename)}">${esc(t.filename)}</td>
+        <td><span class="badge ${esc(badge)}">${esc(badge)}</span></td>
+        <td><div class="pbar-wrap">
+          <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
+          <span class="pct">${pct.toFixed(0)}%</span>
+        </div></td>
+        <td style="color:var(--muted);white-space:nowrap">${esc(t.speed)}</td>
+        <td style="color:var(--muted);white-space:nowrap">${esc(size)}</td>
+        <td><div class="row-actions">
+          <button class="secondary sm" data-action="pause"  data-tag="${esc(t.tag)}">Pause</button>
+          <button class="secondary sm" data-action="resume" data-tag="${esc(t.tag)}">Resume</button>
+          <button class="danger sm"    data-action="cancel" data-tag="${esc(t.tag)}">Cancel</button>
+        </div></td>
+      </tr>`;
     }).join('');
   }
 
-  // Event delegation for per-row buttons
   document.getElementById('tbody').addEventListener('click', e => {
     const btn = e.target.closest('button[data-action]');
     if (!btn) return;
@@ -515,16 +576,120 @@
       const { transfers, truncated } = await apiFetch('/api/transfers');
       renderTransfers(transfers);
       document.getElementById('truncation-warn').classList.toggle('hidden', !truncated);
-      const now = new Date().toLocaleTimeString();
       document.getElementById('refresh-hint').textContent =
-        `Last updated: ${now} · Auto-refreshes every 5 seconds`;
+        `Last updated: ${new Date().toLocaleTimeString()} · Auto-refreshes every 5 seconds`;
     } catch (err) {
       document.getElementById('tbody').innerHTML =
         `<tr><td colspan="6" class="empty">Error: ${esc(err.message)}</td></tr>`;
     }
   }
 
-  // ── API helper ─────────────────────────────────────────────────────────────
+  // ── Retry queue ──────────────────────────────────────────────────────────--
+  let countdownInterval = null;
+  let nextRetryTs = null;
+
+  async function loadQueue() {
+    try {
+      const { items, nextRetry } = await apiFetch('/api/queue');
+      nextRetryTs = nextRetry;
+      renderQueue(items);
+    } catch {}
+  }
+
+  function renderQueue(items) {
+    const panel = document.getElementById('rq-panel');
+    panel.classList.toggle('hidden', !items?.length);
+    if (!items?.length) return;
+
+    document.getElementById('rq-tbody').innerHTML = items.map((item, idx) => {
+      const shortLink = item.link.replace(/^https?:\/\//, '');
+      return `<tr>
+        <td class="link-cell" title="${esc(item.link)}">${esc(shortLink)}</td>
+        <td style="color:var(--muted);font-size:12px">${esc(item.dest)}</td>
+        <td><span class="badge ${esc(item.status)}">${esc(item.status)}</span></td>
+        <td style="color:var(--muted);font-size:12px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"
+            title="${esc(item.lastError || '')}">${esc(item.lastError || '—')}</td>
+        <td><div class="row-actions">
+          <button class="icon sm" data-rq-action="up"     data-id="${esc(item.id)}" title="Move up"   ${idx === 0 ? 'disabled' : ''}>↑</button>
+          <button class="icon sm" data-rq-action="down"   data-id="${esc(item.id)}" title="Move down" ${idx === items.length - 1 ? 'disabled' : ''}>↓</button>
+          <button class="danger sm" data-rq-action="remove" data-id="${esc(item.id)}">✕</button>
+        </div></td>
+      </tr>`;
+    }).join('');
+  }
+
+  function updateCountdown() {
+    const el = document.getElementById('rq-countdown');
+    if (!nextRetryTs) { el.textContent = ''; return; }
+    const ms = nextRetryTs - Date.now();
+    if (ms <= 0) { el.textContent = 'Retrying…'; return; }
+    const m = Math.floor(ms / 60000);
+    const s = Math.floor((ms % 60000) / 1000);
+    el.textContent = `Next retry in ${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  document.getElementById('rq-tbody').addEventListener('click', async e => {
+    const btn = e.target.closest('button[data-rq-action]');
+    if (!btn) return;
+    const action = btn.dataset.rqAction;
+    const id = btn.dataset.id;
+    if (action === 'remove') {
+      await apiFetch(`/api/queue/${id}`, { method: 'DELETE' });
+    } else {
+      await apiFetch(`/api/queue/${id}/move`, { method: 'POST', body: JSON.stringify({ direction: action }) });
+    }
+    loadQueue();
+  });
+
+  async function rqRetryNow() {
+    await apiFetch('/api/queue/retry-now', { method: 'POST' });
+    toast('Retry started', 'success');
+    setTimeout(loadQueue, 1000);
+  }
+
+  async function rqClearAll() {
+    await apiFetch('/api/queue/clear', { method: 'POST' });
+    loadQueue();
+    toast('Retry queue cleared', 'success');
+  }
+
+  // ── History ─────────────────────────────────────────────────────────────────
+  let historyCollapsed = false;
+
+  function toggleHistory() {
+    historyCollapsed = !historyCollapsed;
+    document.getElementById('history-body').style.display = historyCollapsed ? 'none' : '';
+    document.getElementById('history-toggle').textContent = historyCollapsed ? '▸' : '▾';
+  }
+
+  async function loadLog() {
+    try {
+      const { lines } = await apiFetch('/api/log');
+      const el = document.getElementById('history-log');
+      if (!lines.length) {
+        el.innerHTML = '<div class="history-empty">No activity yet</div>';
+        return;
+      }
+      const atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 20;
+      el.innerHTML = lines.map(line => {
+        let cls = '';
+        if (/\bDOWNLOADED\b/.test(line))  cls = 'log-downloaded';
+        else if (/\bQUEUED\b/.test(line)) cls = 'log-queued';
+        else if (/\bFAILED\b/.test(line)) cls = 'log-failed';
+        else if (/\bREMOVED\b/.test(line)) cls = 'log-removed';
+        return `<span class="${cls}">${esc(line)}</span>`;
+      }).join('\n');
+      if (atBottom) el.scrollTop = el.scrollHeight;
+    } catch {}
+  }
+
+  async function clearLog() {
+    await apiFetch('/api/log', { method: 'DELETE' });
+    loadLog();
+    toast('Log cleared', 'success');
+  }
+
+  // ── API helper ──────────────────────────────────────────────────────────────
   async function apiFetch(url, opts = {}) {
     const res = await fetch(url, {
       headers: { 'Content-Type': 'application/json', ...opts.headers },
@@ -535,16 +700,28 @@
     return data;
   }
 
-  // ── Ctrl+Enter to submit ───────────────────────────────────────────────────
+  // ── Ctrl+Enter to submit ────────────────────────────────────────────────────
   document.getElementById('links').addEventListener('keydown', e => {
     if (e.key === 'Enter' && e.ctrlKey) queueDownloads();
   });
 
-  // ── Init ───────────────────────────────────────────────────────────────────
+  // ── Init ────────────────────────────────────────────────────────────────────
   checkStatus();
   loadTransfers();
+  loadQueue();
+  loadLog();
+
   setInterval(loadTransfers, 5000);
+  setInterval(loadQueue, 5000);
+  setInterval(loadLog, 10000);
+  setInterval(updateCountdown, 1000);
   setInterval(checkStatus, 30000);
+
+  // Scroll history to bottom on first load
+  setTimeout(() => {
+    const el = document.getElementById('history-log');
+    el.scrollTop = el.scrollHeight;
+  }, 500);
 </script>
 </body>
 </html>

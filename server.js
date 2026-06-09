@@ -3,21 +3,34 @@
 const express = require('express');
 const cors = require('cors');
 const Docker = require('dockerode');
+const fs = require('fs');
 const path = require('path');
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
 const app = express();
-const PORT = process.env.PORT || 8085;
-const MEGACMD_CONTAINER = process.env.MEGACMD_CONTAINER || 'megacmd';
-const MOCK = process.env.MOCK === '1';
-const TRANSFER_LIMIT = 200;
+const PORT               = process.env.PORT || 8085;
+const MEGACMD_CONTAINER  = process.env.MEGACMD_CONTAINER || 'megacmd';
+const MOCK               = process.env.MOCK === '1';
+const TRANSFER_LIMIT     = 200;
+const RETRY_INTERVAL_MS  = (parseInt(process.env.RETRY_INTERVAL_MIN) || 15) * 60 * 1000;
+const QUEUE_FILE         = path.join(__dirname, 'queue.json');
+const LOG_FILE           = path.join(__dirname, 'activity.log');
 
 if (MOCK) console.log('[MOCK] Running in mock mode — no Docker commands will be executed');
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// ── Activity log ─────────────────────────────────────────────────────────────
+function logActivity(event, link, detail) {
+  const ts = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const detail_str = detail ? ` (${detail})` : '';
+  const line = `[${ts}] ${event.padEnd(12)} ${link}${detail_str}\n`;
+  try { fs.appendFileSync(LOG_FILE, line); } catch {}
+  console.log(`[LOG] ${line.trim()}`);
+}
 
 // ── Mock state ───────────────────────────────────────────────────────────────
 let mockTransfers = [
@@ -68,7 +81,6 @@ function dockerExec(megaCommand, args = []) {
       return Promise.resolve('Download enqueued');
     }
     if (megaCommand === 'mega-transfers') {
-      // Action calls start with -p / -r / -c; list calls start with --limit
       if (['-p', '-r', '-c'].includes(args[0])) {
         applyMockAction(args[0], args[1]);
         return Promise.resolve('');
@@ -85,7 +97,6 @@ function dockerExec(megaCommand, args = []) {
     container.exec({ Cmd: [megaCommand, ...args], AttachStdout: true, AttachStderr: true },
       (err, exec) => {
         if (err) return reject(err);
-
         exec.start({}, (err, stream) => {
           if (err) return reject(err);
 
@@ -106,7 +117,6 @@ function dockerExec(megaCommand, args = []) {
             if (stderr) console.log(`[ERR] ${stderr.trim()}`);
             exec.inspect((err, info) => {
               if (!err && info.ExitCode !== 0) {
-                // Combine stderr + stdout — MEGAcmd spreads messages across both
                 const combined = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n');
                 reject(new Error(combined || `${megaCommand} exited with code ${info.ExitCode}`));
               } else {
@@ -123,7 +133,6 @@ function dockerExec(megaCommand, args = []) {
 }
 
 // ── Transfer parsing ──────────────────────────────────────────────────────────
-// Maps header strings to internal field names (case-insensitive prefix match).
 const COL_MAP = [
   [['tag'],                      'tag'],
   [['type'],                     'type'],
@@ -145,7 +154,6 @@ function mapHeaders(headers) {
   });
 }
 
-// Primary parser: expects pipe-separated output from --col-separator=|
 function parsePipeTransfers(raw) {
   const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
   if (lines.length < 2) return [];
@@ -158,12 +166,11 @@ function parsePipeTransfers(raw) {
 
   const transfers = [];
   for (let i = 1; i < lines.length; i++) {
-    const parts = lines[i].split('|');
-    const typeVal    = get(parts, 'type');
-    const direction  = typeToDirection(typeVal);
-    const stateRaw   = get(parts, 'state');
-    const progressRaw = get(parts, 'progress');
-    const pMatch     = progressRaw.match(/(\d+(?:\.\d+)?)/);
+    const parts     = lines[i].split('|');
+    const typeVal   = get(parts, 'type');
+    const direction = typeToDirection(typeVal);
+    const stateRaw  = get(parts, 'state');
+    const pMatch    = get(parts, 'progress').match(/(\d+(?:\.\d+)?)/);
 
     transfers.push({
       tag:         get(parts, 'tag'),
@@ -176,11 +183,9 @@ function parsePipeTransfers(raw) {
       status:      normalizeStatus(stateRaw, direction),
     });
   }
-
   return transfers.filter(t => t.tag || t.filename);
 }
 
-// Fallback parser for space-padded output (if --col-separator isn't available).
 function parseLegacyTransfers(raw) {
   const lines = raw.split('\n');
   const transfers = [];
@@ -223,33 +228,6 @@ function parseLegacyTransfers(raw) {
   return transfers;
 }
 
-// Converts raw MEGAcmd output into a short, human-readable error message.
-function cleanMegaError(raw) {
-  if (!raw) return 'Unknown error';
-
-  if (/bandwidth quota/i.test(raw)) {
-    const match = raw.match(/try again in (\d+) hour/i);
-    const hours = match ? parseInt(match[1]) : null;
-    return hours
-      ? `Bandwidth quota exceeded — resets in ~${hours} hour${hours !== 1 ? 's' : ''}`
-      : 'Bandwidth quota exceeded';
-  }
-
-  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
-  const useful = [];
-  for (const line of lines) {
-    // Extract the message from inside a MEGAcmd log line: [DATE cmd ERR MESSAGE]
-    const logMatch = line.match(/\[\S+ cmd \w+\s+(.+?)\]?\s*$/);
-    if (logMatch) {
-      useful.push(logMatch[1].replace(/\]$/, '').trim());
-    } else if (!/^(See|Use) /i.test(line) && !/^Transfer not started/i.test(line)) {
-      useful.push(line);
-    }
-  }
-
-  return useful.join(' — ').trim() || raw.trim();
-}
-
 function parseTransfers(raw) {
   const firstLine = raw.split('\n').find(l => l.trim()) || '';
   return firstLine.includes('|') ? parsePipeTransfers(raw) : parseLegacyTransfers(raw);
@@ -265,22 +243,125 @@ function normalizeStatus(state, direction) {
   const s = state.toLowerCase().trim();
   if (!s) return 'unknown';
   if (s === 'active') return direction === 'Uploading' ? 'uploading' : 'downloading';
-  if (s.includes('paus'))   return 'paused';
-  if (s.includes('queue'))  return 'queued';
-  if (s.includes('error') || s.includes('fail')) return 'error';
+  if (s.includes('paus'))                          return 'paused';
+  if (s.includes('queue'))                         return 'queued';
+  if (s.includes('error') || s.includes('fail'))  return 'error';
   if (s.includes('complet') || s.includes('finish')) return 'complete';
-  if (s.includes('download')) return 'downloading';
-  if (s.includes('upload'))   return 'uploading';
+  if (s.includes('download'))                      return 'downloading';
+  if (s.includes('upload'))                        return 'uploading';
   return s;
 }
+
+function cleanMegaError(raw) {
+  if (!raw) return 'Unknown error';
+
+  if (/bandwidth quota/i.test(raw)) {
+    const match = raw.match(/try again in (\d+) hour/i);
+    const hours = match ? parseInt(match[1]) : null;
+    return hours
+      ? `Bandwidth quota exceeded — resets in ~${hours} hour${hours !== 1 ? 's' : ''}`
+      : 'Bandwidth quota exceeded';
+  }
+
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  const useful = [];
+  for (const line of lines) {
+    const logMatch = line.match(/\[\S+ cmd \w+\s+(.+?)\]?\s*$/);
+    if (logMatch) {
+      useful.push(logMatch[1].replace(/\]$/, '').trim());
+    } else if (!/^(See|Use) /i.test(line) && !/^Transfer not started/i.test(line)) {
+      useful.push(line);
+    }
+  }
+  return useful.join(' — ').trim() || raw.trim();
+}
+
+// ── Retry queue ───────────────────────────────────────────────────────────────
+let retryQueue  = [];
+let nextRetryAt = null;
+let retryTimer  = null;
+
+function loadQueue() {
+  try {
+    if (fs.existsSync(QUEUE_FILE)) {
+      retryQueue = JSON.parse(fs.readFileSync(QUEUE_FILE, 'utf8'));
+      retryQueue.forEach(q => { if (q.status === 'retrying') q.status = 'pending'; });
+      console.log(`[QUEUE] Loaded ${retryQueue.length} item(s)`);
+    }
+  } catch { retryQueue = []; }
+}
+
+function saveQueue() {
+  try { fs.writeFileSync(QUEUE_FILE, JSON.stringify(retryQueue, null, 2)); } catch {}
+}
+
+function queueId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+function addToQueue(links, dest) {
+  const items = links.map(link => ({
+    id: queueId(), link, dest,
+    addedAt: new Date().toISOString(),
+    lastAttempt: null, lastError: null, status: 'pending',
+  }));
+  retryQueue.push(...items);
+  saveQueue();
+  items.forEach(i => logActivity('QUEUED', i.link, i.dest));
+  if (!retryTimer) scheduleRetry();
+  return items;
+}
+
+function scheduleRetry(delay = RETRY_INTERVAL_MS) {
+  if (retryTimer) clearTimeout(retryTimer);
+  nextRetryAt = Date.now() + delay;
+  retryTimer = setTimeout(processRetryQueue, delay);
+  console.log(`[QUEUE] Next retry in ${Math.round(delay / 60000)}m`);
+}
+
+async function processRetryQueue() {
+  retryTimer = null;
+  nextRetryAt = null;
+
+  const pending = retryQueue.filter(q => q.status === 'pending');
+  if (!pending.length) return;
+
+  for (const item of pending) {
+    item.status = 'retrying';
+    item.lastAttempt = new Date().toISOString();
+    saveQueue();
+
+    try {
+      await dockerExec('mega-get', [item.link, item.dest]);
+      logActivity('DOWNLOADED', item.link, item.dest);
+      retryQueue = retryQueue.filter(q => q.id !== item.id);
+      saveQueue();
+    } catch (err) {
+      const msg = cleanMegaError(err.message);
+      item.status = 'pending';
+      item.lastError = msg;
+      saveQueue();
+      logActivity('FAILED', item.link, msg);
+      // Quota blocks everything — stop and wait for next cycle
+      if (/bandwidth quota/i.test(err.message)) {
+        scheduleRetry();
+        return;
+      }
+    }
+  }
+
+  if (retryQueue.some(q => q.status === 'pending')) scheduleRetry();
+}
+
+loadQueue();
+if (retryQueue.some(q => q.status === 'pending')) scheduleRetry();
 
 // ── API routes ────────────────────────────────────────────────────────────────
 app.get('/api/status', async (req, res) => {
   try {
-    const whoami  = await dockerExec('mega-whoami');
-    const text    = whoami.trim();
-    const loggedIn = text.length > 0 && !/not logged/i.test(text);
-    res.json({ loggedIn, whoami: text });
+    const whoami = await dockerExec('mega-whoami');
+    const text = whoami.trim();
+    res.json({ loggedIn: text.length > 0 && !/not logged/i.test(text), whoami: text });
   } catch (err) {
     res.json({ loggedIn: false, whoami: err.message });
   }
@@ -299,11 +380,18 @@ app.post('/api/download', async (req, res) => {
     if (!link) continue;
     try {
       await dockerExec('mega-get', [link, destination]);
+      logActivity('DOWNLOADED', link, destination);
       results.push({ link, success: true });
     } catch (err) {
-      results.push({ link, success: false, error: cleanMegaError(err.message) });
+      const error = cleanMegaError(err.message);
+      const quotaExceeded = /bandwidth quota/i.test(err.message);
+      results.push({ link, success: false, error, quotaExceeded });
     }
   }
+
+  // Auto-add quota-blocked links to the retry queue
+  const quotaLinks = results.filter(r => r.quotaExceeded).map(r => r.link);
+  if (quotaLinks.length) addToQueue(quotaLinks, destination);
 
   res.json({ results });
 });
@@ -346,6 +434,78 @@ app.post('/api/transfers/cancel', async (req, res) => {
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// ── Queue routes ──────────────────────────────────────────────────────────────
+app.get('/api/queue', (req, res) => {
+  res.json({ items: retryQueue, nextRetry: nextRetryAt });
+});
+
+app.post('/api/queue/add', (req, res) => {
+  const { links, dest } = req.body;
+  if (!Array.isArray(links) || !links.length)
+    return res.status(400).json({ error: 'No links provided' });
+  const destination = (typeof dest === 'string' && dest.trim()) ? dest.trim() : '/downloads/';
+  const clean = links.map(l => (typeof l === 'string' ? l.trim() : '')).filter(Boolean);
+  if (!clean.length) return res.status(400).json({ error: 'No valid links' });
+  res.json({ items: addToQueue(clean, destination) });
+});
+
+app.delete('/api/queue/:id', (req, res) => {
+  const item = retryQueue.find(q => q.id === req.params.id);
+  if (item) logActivity('REMOVED', item.link);
+  const before = retryQueue.length;
+  retryQueue = retryQueue.filter(q => q.id !== req.params.id);
+  saveQueue();
+  if (!retryQueue.some(q => q.status === 'pending') && retryTimer) {
+    clearTimeout(retryTimer); retryTimer = null; nextRetryAt = null;
+  }
+  res.json({ success: retryQueue.length < before });
+});
+
+app.post('/api/queue/:id/move', (req, res) => {
+  const { direction } = req.body;
+  const idx = retryQueue.findIndex(q => q.id === req.params.id);
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  const swap = direction === 'up' ? idx - 1 : idx + 1;
+  if (swap < 0 || swap >= retryQueue.length) return res.json({ success: false });
+  [retryQueue[idx], retryQueue[swap]] = [retryQueue[swap], retryQueue[idx]];
+  saveQueue();
+  res.json({ success: true });
+});
+
+app.post('/api/queue/retry-now', (req, res) => {
+  if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+  nextRetryAt = null;
+  processRetryQueue();
+  res.json({ success: true });
+});
+
+app.post('/api/queue/clear', (req, res) => {
+  retryQueue.filter(q => q.status !== 'retrying').forEach(q => logActivity('REMOVED', q.link));
+  retryQueue = retryQueue.filter(q => q.status === 'retrying');
+  saveQueue();
+  if (!retryQueue.some(q => q.status === 'pending') && retryTimer) {
+    clearTimeout(retryTimer); retryTimer = null; nextRetryAt = null;
+  }
+  res.json({ success: true });
+});
+
+// ── Log routes ────────────────────────────────────────────────────────────────
+app.get('/api/log', (req, res) => {
+  try {
+    if (!fs.existsSync(LOG_FILE)) return res.json({ lines: [] });
+    const lines = fs.readFileSync(LOG_FILE, 'utf8')
+      .split('\n').filter(Boolean).slice(-200);
+    res.json({ lines });
+  } catch (err) {
+    res.status(500).json({ error: err.message, lines: [] });
+  }
+});
+
+app.delete('/api/log', (req, res) => {
+  try { fs.writeFileSync(LOG_FILE, ''); res.json({ success: true }); }
+  catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 app.listen(PORT, () => {
