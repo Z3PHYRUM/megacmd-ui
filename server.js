@@ -67,7 +67,7 @@ function applyMockAction(flag, tagArg) {
 }
 
 // ── Docker / mock exec ────────────────────────────────────────────────────────
-const EXEC_TIMEOUT = { default: 10000, 'mega-get': 120000 };
+const EXEC_TIMEOUT = { default: 10000, 'mega-get': 0 };  // 0 = no timeout
 
 function dockerExec(megaCommand, args = []) {
   if (MOCK) {
@@ -105,10 +105,9 @@ function dockerExec(megaCommand, args = []) {
 
           let stdout = '', stderr = '';
           const timeoutMs = EXEC_TIMEOUT[megaCommand] ?? EXEC_TIMEOUT.default;
-          const timer = setTimeout(() => {
-            stream.destroy();
-            reject(new Error(`Command timed out: ${megaCommand}`));
-          }, timeoutMs);
+          const timer = timeoutMs
+            ? setTimeout(() => { stream.destroy(); reject(new Error(`Command timed out: ${megaCommand}`)); }, timeoutMs)
+            : null;
 
           docker.modem.demuxStream(stream,
             { write: chunk => { stdout += chunk.toString(); } },
@@ -116,7 +115,7 @@ function dockerExec(megaCommand, args = []) {
           );
 
           stream.on('end', () => {
-            clearTimeout(timer);
+            if (timer) clearTimeout(timer);
             if (stdout) console.log(`[OUT] ${stdout.trim()}`);
             if (stderr) console.log(`[ERR] ${stderr.trim()}`);
             exec.inspect((err, info) => {
@@ -129,7 +128,7 @@ function dockerExec(megaCommand, args = []) {
             });
           });
 
-          stream.on('error', err => { clearTimeout(timer); reject(err); });
+          stream.on('error', err => { if (timer) clearTimeout(timer); reject(err); });
         });
       }
     );
