@@ -80,15 +80,13 @@ cd /opt/docker/stack && docker compose up -d --build megacmd-ui
 
 ### "docker: not found" in container logs
 
-The Alpine-based container doesn't include the Docker CLI. If the `docker` binary isn't found inside the container, bind-mount it from the host:
+The Dockerfile installs `docker-cli` via apk, so this shouldn't happen on a fresh build. If you pulled an older image, rebuild:
 
-```yaml
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /usr/bin/docker:/usr/bin/docker:ro
+```bash
+docker compose up -d --build megacmd-ui
 ```
 
-Then rebuild: `docker compose up -d --build megacmd-ui`
+> **Note:** Bind-mounting the host Docker binary (`/usr/bin/docker:/usr/bin/docker:ro`) does not work — the host binary is dynamically linked and Alpine lacks the required libraries. Installing `docker-cli` via apk is the correct fix.
 
 ### Transfer table is empty or not parsing correctly
 
