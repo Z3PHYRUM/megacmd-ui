@@ -1,9 +1,12 @@
 # MEGAcmd UI
 
+> **⚠️ Alpha software.** This project is under active development. Expect rough edges, breaking changes, and incomplete features. Use at your own risk.
+
 A minimal self-hosted web UI for managing MEGAcmd downloads. Runs as a Docker container alongside an existing `megacmd` container and communicates with it via `docker exec` over the Docker socket.
 
 Designed for homelab use — accessed over Tailscale, no authentication required.
 
+![Alpha](https://img.shields.io/badge/status-alpha-red)
 ![Node 20](https://img.shields.io/badge/node-20--alpine-brightgreen)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 ![MEGAcmd 2.5.2.1](https://img.shields.io/badge/MEGAcmd-2.5.2.1-orange)
@@ -17,9 +20,12 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 ## Features
 
 - **Download queue** — paste one or more Mega links, set a destination, queue them all at once
-- **Transfer manager** — live table of active/queued/paused transfers, auto-refreshes every 5 seconds
+- **Folder file picker** — for `mega.nz/folder/` links, browse contents and select individual files before downloading
+- **Bandwidth quota handling** — quota-exceeded downloads are automatically added to a retry queue and retried every 15 minutes
+- **Transfer manager** — live table of active/queued/paused transfers with progress, speed, and size; auto-refreshes every 5 seconds
 - **Per-transfer controls** — pause, resume, or cancel individual transfers
 - **Bulk controls** — pause all, resume all, cancel all
+- **Activity log** — history of downloads, failures, and queue events (last 200 entries)
 - **Status bar** — shows MEGAcmd login status at a glance
 - **Dark theme** — mobile-friendly, no frameworks, no build step
 
@@ -73,8 +79,9 @@ cd /opt/docker/stack && docker compose up -d --build megacmd-ui
 | Variable | Default | Description |
 |---|---|---|
 | `MEGACMD_CONTAINER` | `megacmd` | Name of the MEGAcmd Docker container |
-| `DOWNLOAD_DEST` | `/downloads/` | Default destination path inside the MEGAcmd container |
 | `PORT` | `8085` | Port the UI listens on |
+| `RETRY_INTERVAL_MIN` | `15` | Minutes between retry queue attempts for quota-exceeded downloads |
+| `DATA_DIR` | `/data` | Path inside the container for `queue.json` and `activity.log` |
 
 ## Troubleshooting
 
