@@ -139,7 +139,7 @@ function dockerExec(megaCommand, args = []) {
 const COL_MAP = [
   [['tag'],                      'tag'],
   [['type'],                     'type'],
-  [['filename', 'name', 'path'], 'filename'],
+  [['filename', 'name', 'path', 'destiny'], 'filename'],
   [['transferred'],              'transferred'],
   [['total'],                    'total'],
   [['speed'],                    'speed'],
@@ -158,7 +158,8 @@ function mapHeaders(headers) {
 }
 
 function parsePipeTransfers(raw) {
-  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  // Skip status/warning lines (e.g. "DOWNLOADS AND UPLOADS ARE PAUSED") — keep only pipe rows
+  const lines = raw.split('\n').map(l => l.trim()).filter(l => l && l.includes('|'));
   if (lines.length < 2) return [];
 
   const fieldMap = mapHeaders(lines[0].split('|'));
@@ -170,10 +171,13 @@ function parsePipeTransfers(raw) {
   const transfers = [];
   for (let i = 1; i < lines.length; i++) {
     const parts     = lines[i].split('|');
-    const typeVal   = get(parts, 'type');
-    const direction = typeToDirection(typeVal);
-    const stateRaw  = get(parts, 'state');
-    const pMatch    = get(parts, 'progress').match(/(\d+(?:\.\d+)?)/);
+    const typeVal     = get(parts, 'type');
+    const direction   = typeToDirection(typeVal);
+    const stateRaw    = get(parts, 'state');
+    const progressRaw = get(parts, 'progress');
+    const pMatch      = progressRaw.match(/(\d+(?:\.\d+)?)\s*%/);
+    // MEGAcmd 2.5+ embeds total size in PROGRESS: "0.00% of 4.70 GB"
+    const totalMatch  = progressRaw.match(/of\s+([\d.]+\s*[KMGT]?B)/i);
 
     transfers.push({
       tag:         get(parts, 'tag'),
@@ -182,7 +186,7 @@ function parsePipeTransfers(raw) {
       progress:    pMatch ? parseFloat(pMatch[1]) : 0,
       speed:       get(parts, 'speed') || '0 B/s',
       transferred: get(parts, 'transferred'),
-      total:       get(parts, 'total'),
+      total:       totalMatch ? totalMatch[1].trim() : get(parts, 'total'),
       status:      normalizeStatus(stateRaw, direction),
     });
   }
@@ -232,8 +236,10 @@ function parseLegacyTransfers(raw) {
 }
 
 function parseTransfers(raw) {
-  const firstLine = raw.split('\n').find(l => l.trim()) || '';
-  return firstLine.includes('|') ? parsePipeTransfers(raw) : parseLegacyTransfers(raw);
+  // Use first pipe-containing line to detect format — MEGAcmd may print status
+  // messages (e.g. "DOWNLOADS AND UPLOADS ARE PAUSED") before the actual data.
+  const firstPipeLine = raw.split('\n').find(l => l.trim().includes('|')) || '';
+  return firstPipeLine ? parsePipeTransfers(raw) : parseLegacyTransfers(raw);
 }
 
 function typeToDirection(type) {
