@@ -118,6 +118,7 @@
     button:active { opacity: 0.65; }
     button:disabled { opacity: 0.35; cursor: not-allowed; }
     button.secondary { background: #37474f; }
+    button.success   { background: #2e7d32; }
     button.danger    { background: #b71c1c; }
     button.sm        { font-size: 11px; padding: 4px 10px; }
     button.icon      { background: none; color: var(--muted); font-size: 15px;
@@ -503,6 +504,7 @@
       <button onclick="bulkAction('pause')">Pause All</button>
       <button onclick="bulkAction('resume')">Resume All</button>
       <button class="danger" onclick="bulkAction('cancel')">Cancel All</button>
+      <button class="success" id="dismiss-completed-btn" onclick="dismissCompleted()" style="display:none">Dismiss Completed</button>
     </div>
     <div class="table-wrap">
       <table>
@@ -531,9 +533,9 @@
   <section class="panel" id="history-panel">
     <div class="panel-header">
       <h2>History</h2>
-      <button class="collapse-btn" id="history-toggle" onclick="toggleHistory()" title="Collapse">▾</button>
+      <button class="collapse-btn" id="history-toggle" onclick="toggleHistory()" title="Expand">▸</button>
     </div>
-    <div id="history-body">
+    <div id="history-body" style="display:none">
       <div id="history-log" class="history-log"></div>
       <div class="toolbar" style="margin-top:10px; margin-bottom:0;">
         <button class="secondary sm" onclick="clearLog()">Clear Log</button>
@@ -724,6 +726,8 @@
     document.getElementById('dl-errors-body').innerHTML = '';
   }
 
+  let currentTransfers = [];
+
   // ── Transfer actions ─────────────────────────────────────────────────────--
   async function transferAction(action, tag) {
     try {
@@ -742,6 +746,14 @@
   }
 
   function bulkAction(action) { transferAction(action, 'all'); }
+
+  async function dismissCompleted() {
+    const done = currentTransfers.filter(t => t.status === 'complete');
+    for (const t of done)
+      await apiFetch('/api/transfers/cancel', { method: 'POST', body: JSON.stringify({ tag: t.tag }) }).catch(() => {});
+    toast(`Dismissed ${done.length} completed transfer${done.length !== 1 ? 's' : ''}`, 'success');
+    loadTransfers();
+  }
   function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
   // ── Size helpers ─────────────────────────────────────────────────────────--
@@ -770,6 +782,12 @@
       return;
     }
 
+    currentTransfers = transfers;
+
+    // Show/hide dismiss completed button
+    document.getElementById('dismiss-completed-btn').style.display =
+      transfers.some(t => t.status === 'complete') ? '' : 'none';
+
     // Compute stats
     const counts = {};
     let totalBytes = 0;
@@ -790,23 +808,25 @@
       const pct  = Math.min(parseFloat(t.progress) || 0, 100);
       const size = t.transferred && t.total ? `${t.transferred} / ${t.total}` : (t.total || '—');
       const badge = t.status || 'unknown';
-      const canPause  = ['downloading', 'uploading', 'queued'].includes(t.status);
-      const canResume = t.status === 'paused';
-      const canCancel = t.status !== 'complete';
+      const isComplete = t.status === 'complete';
+      const canPause   = ['downloading', 'uploading', 'queued'].includes(t.status);
+      const canResume  = t.status === 'paused';
+      const badgeText  = isComplete ? 'Complete!' : badge;
+      const actions    = isComplete
+        ? `<button class="success sm" data-action="cancel" data-tag="${esc(t.tag)}">Dismiss</button>`
+        : `<button class="secondary sm" data-action="pause"  data-tag="${esc(t.tag)}" ${canPause  ? '' : 'disabled'}>Pause</button>
+           <button class="${canResume ? '' : 'secondary '}sm" data-action="resume" data-tag="${esc(t.tag)}" ${canResume ? '' : 'disabled'}>Resume</button>
+           <button class="danger sm"    data-action="cancel" data-tag="${esc(t.tag)}">Cancel</button>`;
       return `<tr>
         <td class="filename-cell" title="${esc(t.filename)}">${esc(t.filename)}</td>
-        <td><span class="badge ${esc(badge)}">${esc(badge)}</span></td>
+        <td><span class="badge ${esc(badge)}">${esc(badgeText)}</span></td>
         <td><div class="pbar-wrap">
           <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
           <span class="pct">${pct.toFixed(0)}%</span>
         </div></td>
         <td style="color:var(--muted);white-space:nowrap">${esc(t.speed) || '—'}</td>
         <td style="color:var(--muted);white-space:nowrap">${esc(size)}</td>
-        <td><div class="row-actions">
-          <button class="secondary sm" data-action="pause"  data-tag="${esc(t.tag)}" ${canPause  ? '' : 'disabled'}>Pause</button>
-          <button class="${canResume ? '' : 'secondary '}sm" data-action="resume" data-tag="${esc(t.tag)}" ${canResume ? '' : 'disabled'}>Resume</button>
-          <button class="danger sm"    data-action="cancel" data-tag="${esc(t.tag)}" ${canCancel ? '' : 'disabled'}>Cancel</button>
-        </div></td>
+        <td><div class="row-actions">${actions}</div></td>
       </tr>`;
     }).join('');
   }
@@ -901,7 +921,7 @@
   }
 
   // ── History ─────────────────────────────────────────────────────────────────
-  let historyCollapsed = false;
+  let historyCollapsed = true;
 
   function toggleHistory() {
     historyCollapsed = !historyCollapsed;
