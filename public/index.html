@@ -4,6 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>MEGAcmd</title>
+  <link rel="icon" type="image/svg+xml" href="/logo.svg">
+  <link rel="icon" type="image/png" href="/images/logo_big.png">
   <style>
     :root {
       --bg:      #0f1117;
@@ -36,6 +38,12 @@
       align-items: center;
       gap: 10px;
       font-size: 13px;
+    }
+
+    .app-logo {
+      width: 28px;
+      height: 28px;
+      flex-shrink: 0;
     }
 
     .dot {
@@ -404,6 +412,7 @@
 <body>
 
 <div id="status-bar">
+  <img src="/logo.svg" alt="MEGAcmd" class="app-logo">
   <div id="status-dot" class="dot"></div>
   <span id="status-text">Checking status…</span>
 </div>
