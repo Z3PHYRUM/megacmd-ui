@@ -555,6 +555,8 @@ app.post('/api/browse/confirm', async (req, res) => {
     try { await dockerExec('mega-transfers', ['-c', String(tag)]); } catch {}
   for (const tag of keep)
     try { await dockerExec('mega-transfers', ['-r', String(tag)]); } catch {}
+  // Clear any global pause so selected transfers actually start
+  if (keep.length) try { await dockerExec('mega-transfers', ['-r', '-a']); } catch {}
   if (keep.length) logActivity('DOWNLOADED', `${keep.length} file(s) selected from folder`, `${cancel.length} skipped`);
   res.json({ success: true });
 });
