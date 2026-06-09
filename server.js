@@ -2,8 +2,10 @@
 
 const express = require('express');
 const cors = require('cors');
-const { execFile } = require('child_process');
+const Docker = require('dockerode');
 const path = require('path');
+
+const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
 const app = express();
 const PORT = process.env.PORT || 8085;
@@ -77,14 +79,44 @@ function dockerExec(megaCommand, args = []) {
   }
 
   return new Promise((resolve, reject) => {
-    const dockerArgs = ['exec', MEGACMD_CONTAINER, megaCommand, ...args];
-    console.log(`[CMD] docker ${dockerArgs.join(' ')}`);
-    execFile('docker', dockerArgs, { timeout: 10000 }, (err, stdout, stderr) => {
-      if (stdout) console.log(`[OUT] ${stdout.trim()}`);
-      if (stderr) console.log(`[ERR] ${stderr.trim()}`);
-      if (err) { reject(new Error(stderr || err.message)); return; }
-      resolve(stdout);
-    });
+    const container = docker.getContainer(MEGACMD_CONTAINER);
+    console.log(`[CMD] exec ${MEGACMD_CONTAINER} ${megaCommand} ${args.join(' ')}`);
+
+    container.exec({ Cmd: [megaCommand, ...args], AttachStdout: true, AttachStderr: true },
+      (err, exec) => {
+        if (err) return reject(err);
+
+        exec.start({}, (err, stream) => {
+          if (err) return reject(err);
+
+          let stdout = '', stderr = '';
+          const timer = setTimeout(() => {
+            stream.destroy();
+            reject(new Error(`Command timed out: ${megaCommand}`));
+          }, 10000);
+
+          docker.modem.demuxStream(stream,
+            { write: chunk => { stdout += chunk.toString(); } },
+            { write: chunk => { stderr += chunk.toString(); } }
+          );
+
+          stream.on('end', () => {
+            clearTimeout(timer);
+            if (stdout) console.log(`[OUT] ${stdout.trim()}`);
+            if (stderr) console.log(`[ERR] ${stderr.trim()}`);
+            exec.inspect((err, info) => {
+              if (!err && info.ExitCode !== 0) {
+                reject(new Error(stderr.trim() || `${megaCommand} exited with code ${info.ExitCode}`));
+              } else {
+                resolve(stdout);
+              }
+            });
+          });
+
+          stream.on('error', err => { clearTimeout(timer); reject(err); });
+        });
+      }
+    );
   });
 }
 

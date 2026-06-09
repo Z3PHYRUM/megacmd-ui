@@ -78,15 +78,16 @@ cd /opt/docker/stack && docker compose up -d --build megacmd-ui
 
 ## Troubleshooting
 
-### "docker: not found" in container logs
+### Docker connectivity issues
 
-The Dockerfile installs `docker-cli` via apk, so this shouldn't happen on a fresh build. If you pulled an older image, rebuild:
+The server communicates with MEGAcmd via the [dockerode](https://github.com/apocas/dockerode) npm package, which talks to the Docker socket directly using the Docker API — no `docker` binary required inside the container. If you see socket errors in the logs, confirm the volume mount is present:
 
-```bash
-docker compose up -d --build megacmd-ui
+```yaml
+volumes:
+  - /var/run/docker.sock:/var/run/docker.sock
 ```
 
-> **Note:** Bind-mounting the host Docker binary (`/usr/bin/docker:/usr/bin/docker:ro`) does not work — the host binary is dynamically linked and Alpine lacks the required libraries. Installing `docker-cli` via apk is the correct fix.
+Then rebuild: `docker compose up -d --build megacmd-ui`
 
 ### Transfer table is empty or not parsing correctly
 
