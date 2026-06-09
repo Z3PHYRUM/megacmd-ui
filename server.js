@@ -67,6 +67,8 @@ function applyMockAction(flag, tagArg) {
 }
 
 // ── Docker / mock exec ────────────────────────────────────────────────────────
+const EXEC_TIMEOUT = { default: 10000, 'mega-get': 120000 };
+
 function dockerExec(megaCommand, args = []) {
   if (MOCK) {
     console.log(`[MOCK] ${megaCommand} ${args.join(' ')}`);
@@ -102,10 +104,11 @@ function dockerExec(megaCommand, args = []) {
           if (err) return reject(err);
 
           let stdout = '', stderr = '';
+          const timeoutMs = EXEC_TIMEOUT[megaCommand] ?? EXEC_TIMEOUT.default;
           const timer = setTimeout(() => {
             stream.destroy();
             reject(new Error(`Command timed out: ${megaCommand}`));
-          }, 10000);
+          }, timeoutMs);
 
           docker.modem.demuxStream(stream,
             { write: chunk => { stdout += chunk.toString(); } },
