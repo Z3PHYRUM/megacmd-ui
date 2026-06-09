@@ -14,8 +14,9 @@ const MEGACMD_CONTAINER  = process.env.MEGACMD_CONTAINER || 'megacmd';
 const MOCK               = process.env.MOCK === '1';
 const TRANSFER_LIMIT     = 200;
 const RETRY_INTERVAL_MS  = (parseInt(process.env.RETRY_INTERVAL_MIN) || 15) * 60 * 1000;
-const QUEUE_FILE         = path.join(__dirname, 'queue.json');
-const LOG_FILE           = path.join(__dirname, 'activity.log');
+const DATA_DIR           = process.env.DATA_DIR || __dirname;
+const QUEUE_FILE         = path.join(DATA_DIR, 'queue.json');
+const LOG_FILE           = path.join(DATA_DIR, 'activity.log');
 
 if (MOCK) console.log('[MOCK] Running in mock mode — no Docker commands will be executed');
 
@@ -332,7 +333,7 @@ async function processRetryQueue() {
     saveQueue();
 
     try {
-      await dockerExec('mega-get', [item.link, item.dest]);
+      await dockerExec('mega-get', ['--ignore-quota-warn', item.link, item.dest]);
       logActivity('DOWNLOADED', item.link, item.dest);
       retryQueue = retryQueue.filter(q => q.id !== item.id);
       saveQueue();
@@ -379,7 +380,7 @@ app.post('/api/download', async (req, res) => {
     const link = typeof rawLink === 'string' ? rawLink.trim() : '';
     if (!link) continue;
     try {
-      await dockerExec('mega-get', [link, destination]);
+      await dockerExec('mega-get', ['--ignore-quota-warn', link, destination]);
       logActivity('DOWNLOADED', link, destination);
       results.push({ link, success: true });
     } catch (err) {
