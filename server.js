@@ -106,7 +106,9 @@ function dockerExec(megaCommand, args = []) {
             if (stderr) console.log(`[ERR] ${stderr.trim()}`);
             exec.inspect((err, info) => {
               if (!err && info.ExitCode !== 0) {
-                reject(new Error(stderr.trim() || `${megaCommand} exited with code ${info.ExitCode}`));
+                // Combine stderr + stdout — MEGAcmd spreads messages across both
+                const combined = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n');
+                reject(new Error(combined || `${megaCommand} exited with code ${info.ExitCode}`));
               } else {
                 resolve(stdout);
               }
@@ -221,22 +223,31 @@ function parseLegacyTransfers(raw) {
   return transfers;
 }
 
-// Converts raw MEGAcmd stderr into a short, human-readable message.
-// Strips internal timestamp lines and surfaces the most useful part.
+// Converts raw MEGAcmd output into a short, human-readable error message.
 function cleanMegaError(raw) {
   if (!raw) return 'Unknown error';
 
   if (/bandwidth quota/i.test(raw)) {
-    const hours = raw.match(/try again in (\d+ hour)/i);
-    return hours ? `Bandwidth quota exceeded — ${hours[1]}s remaining` : 'Bandwidth quota exceeded';
+    const match = raw.match(/try again in (\d+) hour/i);
+    const hours = match ? parseInt(match[1]) : null;
+    return hours
+      ? `Bandwidth quota exceeded — resets in ~${hours} hour${hours !== 1 ? 's' : ''}`
+      : 'Bandwidth quota exceeded';
   }
 
-  // Remove timestamp log lines like [2026-06-09_02:17:05.123 cmd ERR ...]
-  const lines = raw.split('\n')
-    .map(l => l.trim())
-    .filter(l => l && !/^\[\d{4}-\d{2}-\d{2}_/.test(l) && !/^(See|Use) /i.test(l));
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  const useful = [];
+  for (const line of lines) {
+    // Extract the message from inside a MEGAcmd log line: [DATE cmd ERR MESSAGE]
+    const logMatch = line.match(/\[\S+ cmd \w+\s+(.+?)\]?\s*$/);
+    if (logMatch) {
+      useful.push(logMatch[1].replace(/\]$/, '').trim());
+    } else if (!/^(See|Use) /i.test(line) && !/^Transfer not started/i.test(line)) {
+      useful.push(line);
+    }
+  }
 
-  return lines.join(' — ').trim() || raw.trim();
+  return useful.join(' — ').trim() || raw.trim();
 }
 
 function parseTransfers(raw) {
