@@ -315,6 +315,69 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* ── Folder picker modal ── */
+    .browse-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.65);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      padding: 16px;
+    }
+    .browse-overlay.hidden { display: none; }
+    .browse-modal {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      display: flex;
+      flex-direction: column;
+      max-height: 80vh;
+      max-width: 720px;
+      width: 100%;
+      overflow: hidden;
+    }
+    .browse-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .browse-header span {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .browse-body {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      padding: 14px 18px;
+      gap: 10px;
+      min-height: 0;
+    }
+    .browse-loading {
+      text-align: center;
+      color: var(--muted);
+      font-size: 13px;
+      padding: 32px 0;
+    }
+    .browse-file-wrap { flex: 1; overflow-y: auto; min-height: 0; }
+    .browse-footer {
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+      padding: 12px 18px;
+      flex-shrink: 0;
+    }
+
     /* ── Mobile ── */
     @media (max-width: 600px) {
       .dl-row { flex-direction: column; }
@@ -331,6 +394,45 @@
 </div>
 
 <div id="toasts"></div>
+
+<!-- Folder picker modal -->
+<div id="browse-overlay" class="browse-overlay hidden">
+  <div class="browse-modal">
+    <div class="browse-header">
+      <span>Select Files to Download</span>
+      <button class="icon" id="browse-close" title="Cancel">✕</button>
+    </div>
+    <div class="browse-body">
+      <div id="browse-loading" class="browse-loading" style="display:none">
+        <span class="spinner"></span>Enumerating folder contents…
+      </div>
+      <div id="browse-content" style="display:none; flex-direction:column; gap:10px; flex:1; min-height:0;">
+        <div class="toolbar" style="margin:0">
+          <button class="secondary sm" onclick="browseSelectAll(true)">Select All</button>
+          <button class="secondary sm" onclick="browseSelectAll(false)">Select None</button>
+          <span class="countdown" id="browse-count"></span>
+        </div>
+        <div class="browse-file-wrap table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:34px;padding:8px 6px 8px 11px"></th>
+                <th>File</th>
+                <th>Size</th>
+              </tr>
+            </thead>
+            <tbody id="browse-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="browse-error" class="dl-errors hidden"></div>
+    </div>
+    <div class="browse-footer">
+      <button class="secondary" id="browse-cancel-btn">Cancel</button>
+      <button id="browse-confirm-btn" disabled>Download Selected</button>
+    </div>
+  </div>
+</div>
 
 <main>
   <!-- Download Queue -->
@@ -464,31 +566,41 @@
 
   // ── Downloads ───────────────────────────────────────────────────────────────
   async function queueDownloads() {
-    const links = document.getElementById('links').value
+    const all = document.getElementById('links').value
       .split('\n').map(l => l.trim()).filter(Boolean);
-    if (!links.length) { toast('No links entered', 'error'); return; }
+    if (!all.length) { toast('No links entered', 'error'); return; }
 
+    const dest    = document.getElementById('dest').value;
+    const folders = all.filter(l => /mega\.nz\/folder\//i.test(l));
+    const files   = all.filter(l => !/mega\.nz\/folder\//i.test(l));
+
+    if (files.length) await startDownloads(files, dest);
+
+    if (folders.length > 0) {
+      openFolderPicker(folders[0], dest);
+      if (folders.length > 1)
+        toast(`${folders.length - 1} more folder link(s) — add them after this one`, 'warn', 6000);
+    }
+  }
+
+  async function startDownloads(links, dest) {
     const btn = document.getElementById('dl-btn');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>Queuing…';
-
     try {
       const { results } = await apiFetch('/api/download', {
         method: 'POST',
-        body: JSON.stringify({ links, dest: document.getElementById('dest').value }),
+        body: JSON.stringify({ links, dest }),
       });
-
       const ok    = results.filter(r => r.success);
       const quota = results.filter(r => r.quotaExceeded);
       const bad   = results.filter(r => !r.success && !r.quotaExceeded);
-
       if (ok.length) toast(`Queued ${ok.length} download${ok.length > 1 ? 's' : ''}`, 'success');
       if (quota.length) {
         toast(`${quota.length} link${quota.length > 1 ? 's' : ''} added to retry queue (quota exceeded)`, 'warn', 6000);
-        loadQueue(); // show queue panel immediately
+        loadQueue();
       }
       if (bad.length) showDlErrors(bad);
-
       if (ok.length || quota.length) document.getElementById('links').value = '';
     } catch (err) {
       toast(`Request failed: ${err.message}`, 'error');
@@ -496,6 +608,87 @@
       btn.disabled = false;
       btn.textContent = 'Download';
     }
+  }
+
+  // ── Folder picker ───────────────────────────────────────────────────────────
+  function openFolderPicker(link, dest) {
+    const overlay = document.getElementById('browse-overlay');
+    overlay.classList.remove('hidden');
+    document.getElementById('browse-loading').style.display = 'block';
+    document.getElementById('browse-content').style.display = 'none';
+    document.getElementById('browse-error').classList.add('hidden');
+    document.getElementById('browse-confirm-btn').disabled = true;
+
+    apiFetch('/api/browse', { method: 'POST', body: JSON.stringify({ link, dest }) })
+      .then(({ files }) => {
+        document.getElementById('browse-loading').style.display = 'none';
+        renderBrowseFiles(files, dest);
+        document.getElementById('browse-content').style.display = 'flex';
+        document.getElementById('browse-confirm-btn').disabled = false;
+        updateBrowseCount();
+      })
+      .catch(err => {
+        document.getElementById('browse-loading').style.display = 'none';
+        const el = document.getElementById('browse-error');
+        el.innerHTML = `<div class="dl-errors-header"><span>${esc(err.message)}</span></div>`;
+        el.classList.remove('hidden');
+      });
+  }
+
+  function renderBrowseFiles(files, dest) {
+    const prefix = dest.endsWith('/') ? dest : dest + '/';
+    document.getElementById('browse-tbody').innerHTML = files.map(f => {
+      const rel = f.filename.startsWith(prefix) ? f.filename.slice(prefix.length) : f.filename;
+      return `<tr>
+        <td style="padding:7px 6px 7px 11px">
+          <input type="checkbox" class="browse-cb" data-tag="${esc(f.tag)}" checked>
+        </td>
+        <td class="filename-cell" title="${esc(f.filename)}">${esc(rel)}</td>
+        <td style="color:var(--muted);white-space:nowrap;font-size:12px">${esc(f.total || '—')}</td>
+      </tr>`;
+    }).join('');
+    document.getElementById('browse-tbody').querySelectorAll('.browse-cb')
+      .forEach(cb => cb.addEventListener('change', updateBrowseCount));
+  }
+
+  function updateBrowseCount() {
+    const all     = document.querySelectorAll('.browse-cb').length;
+    const checked = document.querySelectorAll('.browse-cb:checked').length;
+    document.getElementById('browse-count').textContent = `${checked} / ${all} selected`;
+  }
+
+  function browseSelectAll(select) {
+    document.querySelectorAll('.browse-cb').forEach(cb => { cb.checked = select; });
+    updateBrowseCount();
+  }
+
+  async function browseConfirm() {
+    const keep = [], cancel = [];
+    document.querySelectorAll('.browse-cb').forEach(cb =>
+      (cb.checked ? keep : cancel).push(cb.dataset.tag)
+    );
+    const btn = document.getElementById('browse-confirm-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Starting…';
+    try {
+      await apiFetch('/api/browse/confirm', { method: 'POST', body: JSON.stringify({ keep, cancel }) });
+      document.getElementById('browse-overlay').classList.add('hidden');
+      document.getElementById('links').value = '';
+      toast(`Started ${keep.length} download${keep.length !== 1 ? 's' : ''}`, 'success');
+      loadTransfers();
+    } catch (err) {
+      toast(`Error: ${err.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Download Selected';
+    }
+  }
+
+  async function browseDismiss() {
+    const tags = [...document.querySelectorAll('.browse-cb')].map(cb => cb.dataset.tag);
+    if (tags.length)
+      await apiFetch('/api/browse/confirm', { method: 'POST', body: JSON.stringify({ keep: [], cancel: tags }) }).catch(() => {});
+    document.getElementById('browse-overlay').classList.add('hidden');
   }
 
   // ── Download error panel ─────────────────────────────────────────────────--
@@ -677,6 +870,7 @@
         else if (/\bQUEUED\b/.test(line)) cls = 'log-queued';
         else if (/\bFAILED\b/.test(line)) cls = 'log-failed';
         else if (/\bREMOVED\b/.test(line)) cls = 'log-removed';
+        else if (/\bBROWSE\b/.test(line)) cls = 'log-queued';
         return `<span class="${cls}">${esc(line)}</span>`;
       }).join('\n');
       if (atBottom) el.scrollTop = el.scrollHeight;
@@ -704,6 +898,11 @@
   document.getElementById('links').addEventListener('keydown', e => {
     if (e.key === 'Enter' && e.ctrlKey) queueDownloads();
   });
+
+  // ── Browse modal button wiring ──────────────────────────────────────────────
+  document.getElementById('browse-confirm-btn').addEventListener('click', browseConfirm);
+  document.getElementById('browse-cancel-btn').addEventListener('click', browseDismiss);
+  document.getElementById('browse-close').addEventListener('click', browseDismiss);
 
   // ── Init ────────────────────────────────────────────────────────────────────
   checkStatus();

@@ -503,6 +503,62 @@ app.post('/api/queue/clear', (req, res) => {
   res.json({ success: true });
 });
 
+// ── Browse routes ─────────────────────────────────────────────────────────────
+app.post('/api/browse', async (req, res) => {
+  const { link, dest } = req.body;
+  if (!link) return res.status(400).json({ error: 'No link provided' });
+  const destination = (typeof dest === 'string' && dest.trim()) ? dest.trim() : '/downloads/';
+
+  // Snapshot existing tags so we can identify what mega-get adds
+  let existingTags = new Set();
+  try {
+    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
+    parseTransfers(raw).forEach(t => { if (t.tag) existingTags.add(t.tag); });
+  } catch {}
+
+  // Background mega-get so it returns immediately after telling the daemon to queue the folder.
+  // $1/$2 positional params avoid shell injection.
+  try {
+    await dockerExec('/bin/sh', ['-c', 'mega-get --ignore-quota-warn "$1" "$2" > /dev/null 2>&1 &', 'sh', link, destination]);
+  } catch (err) {
+    return res.status(500).json({ error: cleanMegaError(err.message) });
+  }
+
+  // Poll until the transfer count stabilises (no new entries for two consecutive polls) or 8 s elapses
+  let newTransfers = [], prevCount = -1;
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 700));
+    try {
+      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
+      const fresh = parseTransfers(raw).filter(t => t.tag && !existingTags.has(t.tag));
+      if (fresh.length > 0 && fresh.length === prevCount) { newTransfers = fresh; break; }
+      prevCount = fresh.length;
+      newTransfers = fresh;
+    } catch {}
+  }
+
+  if (!newTransfers.length)
+    return res.status(500).json({ error: 'No files found — quota exceeded, link invalid, or folder is empty' });
+
+  // Pause each new transfer so nothing downloads before the user confirms
+  for (const t of newTransfers)
+    try { await dockerExec('mega-transfers', ['-p', t.tag]); } catch {}
+
+  logActivity('BROWSE', link, `${newTransfers.length} file(s) found`);
+  res.json({ files: newTransfers, dest: destination });
+});
+
+app.post('/api/browse/confirm', async (req, res) => {
+  const { keep = [], cancel = [] } = req.body;
+  for (const tag of cancel)
+    try { await dockerExec('mega-transfers', ['-c', String(tag)]); } catch {}
+  for (const tag of keep)
+    try { await dockerExec('mega-transfers', ['-r', String(tag)]); } catch {}
+  if (keep.length) logActivity('DOWNLOADED', `${keep.length} file(s) selected from folder`, `${cancel.length} skipped`);
+  res.json({ success: true });
+});
+
 // ── Log routes ────────────────────────────────────────────────────────────────
 app.get('/api/log', (req, res) => {
   try {
