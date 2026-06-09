@@ -214,6 +214,20 @@
 
     .refresh-hint { color: var(--muted); font-size: 12px; margin-top: 10px; text-align: right; }
 
+    /* ── Transfer stats ── */
+    .transfer-stats {
+      color: var(--muted);
+      font-size: 12px;
+      margin-bottom: 12px;
+      display: flex;
+      gap: 0;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .transfer-stats.hidden { display: none; }
+    .transfer-stats strong { color: var(--text); font-weight: 600; }
+    .transfer-stats .sep { margin: 0 8px; opacity: 0.35; }
+
     /* ── Download error panel ── */
     .dl-errors { border-radius: 6px; border: 1px solid rgba(244,67,54,.35);
                  background: rgba(244,67,54,.08); margin-top: 10px; overflow: hidden; }
@@ -458,7 +472,7 @@
   <!-- Retry Queue (hidden when empty) -->
   <section class="panel hidden" id="rq-panel">
     <div class="panel-header">
-      <h2>Retry Queue</h2>
+      <h2>Retry Queue <span id="rq-count" style="font-weight:400;opacity:0.6"></span></h2>
     </div>
     <div class="toolbar">
       <button onclick="rqRetryNow()">Retry Now</button>
@@ -484,6 +498,7 @@
   <!-- Transfer Manager -->
   <section class="panel">
     <h2>Transfer Manager</h2>
+    <div id="transfer-stats" class="transfer-stats hidden"></div>
     <div class="toolbar">
       <button onclick="bulkAction('pause')">Pause All</button>
       <button onclick="bulkAction('resume')">Resume All</button>
@@ -729,17 +744,55 @@
   function bulkAction(action) { transferAction(action, 'all'); }
   function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
+  // ── Size helpers ─────────────────────────────────────────────────────────--
+  function parseBytes(s) {
+    if (!s) return 0;
+    const m = s.match(/([\d.]+)\s*([KMGT]?)B/i);
+    if (!m) return 0;
+    const mult = { '': 1, K: 1024, M: 1048576, G: 1073741824, T: 1099511627776 };
+    return parseFloat(m[1]) * (mult[m[2].toUpperCase()] || 1);
+  }
+
+  function fmtBytes(n) {
+    if (n >= 1073741824) return (n / 1073741824).toFixed(2) + ' GB';
+    if (n >= 1048576)    return (n / 1048576).toFixed(2) + ' MB';
+    if (n >= 1024)       return (n / 1024).toFixed(2) + ' KB';
+    return n + ' B';
+  }
+
   // ── Transfer table ───────────────────────────────────────────────────────--
   function renderTransfers(transfers) {
-    const tbody = document.getElementById('tbody');
+    const tbody   = document.getElementById('tbody');
+    const statsEl = document.getElementById('transfer-stats');
     if (!transfers?.length) {
       tbody.innerHTML = '<tr><td colspan="6" class="empty">No active transfers</td></tr>';
+      statsEl.classList.add('hidden');
       return;
     }
+
+    // Compute stats
+    const counts = {};
+    let totalBytes = 0;
+    for (const t of transfers) {
+      counts[t.status] = (counts[t.status] || 0) + 1;
+      totalBytes += parseBytes(t.total);
+    }
+    const statParts = [`<strong>${transfers.length}</strong> transfer${transfers.length !== 1 ? 's' : ''}`];
+    const ORDER = ['downloading', 'uploading', 'queued', 'paused', 'error', 'complete'];
+    for (const s of [...ORDER, ...Object.keys(counts).filter(k => !ORDER.includes(k))]) {
+      if (counts[s]) statParts.push(`<strong>${counts[s]}</strong> ${s}`);
+    }
+    if (totalBytes > 0) statParts.push(`<strong>${fmtBytes(totalBytes)}</strong> total`);
+    statsEl.innerHTML = statParts.join('<span class="sep">·</span>');
+    statsEl.classList.remove('hidden');
+
     tbody.innerHTML = transfers.map(t => {
       const pct  = Math.min(parseFloat(t.progress) || 0, 100);
       const size = t.transferred && t.total ? `${t.transferred} / ${t.total}` : (t.total || '—');
       const badge = t.status || 'unknown';
+      const canPause  = ['downloading', 'uploading', 'queued'].includes(t.status);
+      const canResume = t.status === 'paused';
+      const canCancel = t.status !== 'complete';
       return `<tr>
         <td class="filename-cell" title="${esc(t.filename)}">${esc(t.filename)}</td>
         <td><span class="badge ${esc(badge)}">${esc(badge)}</span></td>
@@ -747,12 +800,12 @@
           <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
           <span class="pct">${pct.toFixed(0)}%</span>
         </div></td>
-        <td style="color:var(--muted);white-space:nowrap">${esc(t.speed)}</td>
+        <td style="color:var(--muted);white-space:nowrap">${esc(t.speed) || '—'}</td>
         <td style="color:var(--muted);white-space:nowrap">${esc(size)}</td>
         <td><div class="row-actions">
-          <button class="secondary sm" data-action="pause"  data-tag="${esc(t.tag)}">Pause</button>
-          <button class="secondary sm" data-action="resume" data-tag="${esc(t.tag)}">Resume</button>
-          <button class="danger sm"    data-action="cancel" data-tag="${esc(t.tag)}">Cancel</button>
+          <button class="secondary sm" data-action="pause"  data-tag="${esc(t.tag)}" ${canPause  ? '' : 'disabled'}>Pause</button>
+          <button class="${canResume ? '' : 'secondary '}sm" data-action="resume" data-tag="${esc(t.tag)}" ${canResume ? '' : 'disabled'}>Resume</button>
+          <button class="danger sm"    data-action="cancel" data-tag="${esc(t.tag)}" ${canCancel ? '' : 'disabled'}>Cancel</button>
         </div></td>
       </tr>`;
     }).join('');
@@ -793,6 +846,7 @@
     const panel = document.getElementById('rq-panel');
     panel.classList.toggle('hidden', !items?.length);
     if (!items?.length) return;
+    document.getElementById('rq-count').textContent = `(${items.length} item${items.length !== 1 ? 's' : ''})`;
 
     document.getElementById('rq-tbody').innerHTML = items.map((item, idx) => {
       const shortLink = item.link.replace(/^https?:\/\//, '');

@@ -184,7 +184,7 @@ function parsePipeTransfers(raw) {
       direction,
       filename:    get(parts, 'filename'),
       progress:    pMatch ? parseFloat(pMatch[1]) : 0,
-      speed:       get(parts, 'speed') || '0 B/s',
+      speed:       get(parts, 'speed'),
       transferred: get(parts, 'transferred'),
       total:       totalMatch ? totalMatch[1].trim() : get(parts, 'total'),
       status:      normalizeStatus(stateRaw, direction),
