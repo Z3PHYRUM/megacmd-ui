@@ -221,6 +221,24 @@ function parseLegacyTransfers(raw) {
   return transfers;
 }
 
+// Converts raw MEGAcmd stderr into a short, human-readable message.
+// Strips internal timestamp lines and surfaces the most useful part.
+function cleanMegaError(raw) {
+  if (!raw) return 'Unknown error';
+
+  if (/bandwidth quota/i.test(raw)) {
+    const hours = raw.match(/try again in (\d+ hour)/i);
+    return hours ? `Bandwidth quota exceeded — ${hours[1]}s remaining` : 'Bandwidth quota exceeded';
+  }
+
+  // Remove timestamp log lines like [2026-06-09_02:17:05.123 cmd ERR ...]
+  const lines = raw.split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !/^\[\d{4}-\d{2}-\d{2}_/.test(l) && !/^(See|Use) /i.test(l));
+
+  return lines.join(' — ').trim() || raw.trim();
+}
+
 function parseTransfers(raw) {
   const firstLine = raw.split('\n').find(l => l.trim()) || '';
   return firstLine.includes('|') ? parsePipeTransfers(raw) : parseLegacyTransfers(raw);
@@ -272,7 +290,7 @@ app.post('/api/download', async (req, res) => {
       await dockerExec('mega-get', [link, destination]);
       results.push({ link, success: true });
     } catch (err) {
-      results.push({ link, success: false, error: err.message });
+      results.push({ link, success: false, error: cleanMegaError(err.message) });
     }
   }
 

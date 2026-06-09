@@ -197,6 +197,44 @@
 
     .refresh-hint { color: var(--muted); font-size: 12px; margin-top: 10px; text-align: right; }
 
+    .dl-errors {
+      border-radius: 6px;
+      border: 1px solid rgba(244,67,54,.35);
+      background: rgba(244,67,54,.08);
+      margin-top: 10px;
+      overflow: hidden;
+    }
+    .dl-errors.hidden { display: none; }
+    .dl-errors-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 7px 11px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #ef9a9a;
+    }
+    .dl-errors-header button {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 16px;
+      line-height: 1;
+      padding: 0 2px;
+    }
+    .dl-error-item {
+      border-top: 1px solid rgba(244,67,54,.2);
+      font-size: 12px;
+      padding: 6px 11px;
+      color: var(--muted);
+    }
+    .dl-error-item strong {
+      color: #ef9a9a;
+      display: block;
+      margin-bottom: 2px;
+    }
+
     .truncation-warn {
       background: rgba(255,152,0,.12);
       border: 1px solid rgba(255,152,0,.35);
@@ -279,6 +317,13 @@
     <div class="dl-row">
       <input type="text" id="dest" value="/downloads/" placeholder="Destination path">
       <button id="dl-btn" onclick="queueDownloads()">Download</button>
+    </div>
+    <div class="dl-errors hidden" id="dl-errors">
+      <div class="dl-errors-header">
+        <span id="dl-errors-title">Download errors</span>
+        <button onclick="clearDlErrors()" title="Dismiss">×</button>
+      </div>
+      <div id="dl-errors-body"></div>
     </div>
   </section>
 
@@ -370,10 +415,11 @@
       const ok  = results.filter(r => r.success);
       const bad = results.filter(r => !r.success);
 
-      if (ok.length)  toast(`Queued ${ok.length} download${ok.length > 1 ? 's' : ''}`, 'success');
-      for (const r of bad) toast(`Failed: ${r.link.slice(0, 50)}… — ${r.error}`, 'error', 7000);
-
-      if (ok.length) document.getElementById('links').value = '';
+      if (ok.length) {
+        toast(`Queued ${ok.length} download${ok.length > 1 ? 's' : ''}`, 'success');
+        document.getElementById('links').value = '';
+      }
+      if (bad.length) showDlErrors(bad);
     } catch (err) {
       toast(`Request failed: ${err.message}`, 'error');
     } finally {
@@ -399,6 +445,24 @@
     } catch (err) {
       toast(`${cap(action)} failed: ${err.message}`, 'error');
     }
+  }
+
+  function showDlErrors(failures) {
+    const panel = document.getElementById('dl-errors');
+    const body  = document.getElementById('dl-errors-body');
+    const title = document.getElementById('dl-errors-title');
+    title.textContent = `${failures.length} download${failures.length > 1 ? 's' : ''} failed`;
+    body.innerHTML = failures.map(r => `
+      <div class="dl-error-item">
+        <strong>${esc(r.error)}</strong>
+        ${esc(r.link)}
+      </div>`).join('');
+    panel.classList.remove('hidden');
+  }
+
+  function clearDlErrors() {
+    document.getElementById('dl-errors').classList.add('hidden');
+    document.getElementById('dl-errors-body').innerHTML = '';
   }
 
   function bulkAction(action) { transferAction(action, 'all'); }
