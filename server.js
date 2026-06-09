@@ -264,6 +264,9 @@ function normalizeStatus(state, direction) {
 function cleanMegaError(raw) {
   if (!raw) return 'Unknown error';
 
+  if (/error code:\s*Incomplete/i.test(raw) && /100\.00\s*%/.test(raw))
+    return 'Download complete (MEGAcmd reported incomplete — verify files)';
+
   if (/bandwidth quota/i.test(raw)) {
     const match = raw.match(/try again in (\d+) hour/i);
     const hours = match ? parseInt(match[1]) : null;
@@ -278,7 +281,7 @@ function cleanMegaError(raw) {
     const logMatch = line.match(/\[\S+ cmd \w+\s+(.+?)\]?\s*$/);
     if (logMatch) {
       useful.push(logMatch[1].replace(/\]$/, '').trim());
-    } else if (!/^(See|Use) /i.test(line) && !/^Transfer not started/i.test(line)) {
+    } else if (!/^(See|Use) /i.test(line) && !/^Transfer not started/i.test(line) && !/^TRANSFERRING /i.test(line)) {
       useful.push(line);
     }
   }
