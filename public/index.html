@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MEGAcmd</title>
+  <style>
+    :root {
+      --bg:      #0f1117;
+      --panel:   #1a1d27;
+      --border:  #2a2d3a;
+      --text:    #e4e6f0;
+      --muted:   #7a7d8e;
+      --accent:  #5c6bc0;
+      --success: #4caf50;
+      --error:   #f44336;
+      --warn:    #ff9800;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Status bar ── */
+    #status-bar {
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      padding: 9px 18px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 9px; height: 9px;
+      border-radius: 50%;
+      background: var(--muted);
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .dot.online  { background: var(--success); }
+    .dot.offline { background: var(--error); }
+
+    #status-text { color: var(--muted); }
+
+    /* ── Layout ── */
+    main {
+      max-width: 1020px;
+      margin: 0 auto;
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 18px;
+    }
+
+    .panel h2 {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 14px;
+    }
+
+    /* ── Form elements ── */
+    textarea, input[type="text"] {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font-size: 13px;
+      padding: 9px 11px;
+      width: 100%;
+      transition: border-color 0.15s;
+    }
+    textarea { font-family: 'Courier New', monospace; resize: vertical; min-height: 120px; }
+    textarea:focus, input[type="text"]:focus { outline: none; border-color: var(--accent); }
+    textarea::placeholder, input::placeholder { color: var(--muted); }
+
+    .dl-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 10px;
+      align-items: center;
+    }
+    .dl-row input { flex: 1; }
+
+    /* ── Buttons ── */
+    button {
+      background: var(--accent);
+      border: none;
+      border-radius: 6px;
+      color: #fff;
+      cursor: pointer;
+      font-size: 13px;
+      font-weight: 600;
+      padding: 8px 16px;
+      white-space: nowrap;
+      transition: opacity 0.12s;
+    }
+    button:hover  { opacity: 0.85; }
+    button:active { opacity: 0.65; }
+    button:disabled { opacity: 0.35; cursor: not-allowed; }
+    button.secondary { background: #37474f; }
+    button.danger    { background: #b71c1c; }
+    button.sm { font-size: 11px; padding: 4px 10px; }
+
+    /* ── Toolbar ── */
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+
+    /* ── Table ── */
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+
+    th {
+      background: var(--bg);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      padding: 8px 11px;
+      text-align: left;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    td {
+      border-top: 1px solid var(--border);
+      padding: 9px 11px;
+      vertical-align: middle;
+    }
+    tr:hover td { background: rgba(255,255,255,0.025); }
+
+    .filename-cell {
+      max-width: 220px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .badge {
+      border-radius: 4px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      padding: 2px 7px;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .badge.downloading { background: rgba(92,107,192,.22); color: #9fa8da; }
+    .badge.uploading   { background: rgba(0,150,136,.22);  color: #80cbc4; }
+    .badge.paused      { background: rgba(255,152,0,.22);  color: #ffcc80; }
+    .badge.queued      { background: rgba(255,255,255,.1); color: var(--muted); }
+    .badge.error       { background: rgba(244,67,54,.22);  color: #ef9a9a; }
+    .badge.complete    { background: rgba(76,175,80,.22);  color: #a5d6a7; }
+    .badge.unknown     { background: rgba(255,255,255,.08); color: var(--muted); }
+
+    .pbar-wrap { display: flex; align-items: center; gap: 8px; }
+    .pbar {
+      background: var(--border);
+      border-radius: 3px;
+      height: 4px;
+      min-width: 70px;
+      overflow: hidden;
+      flex: 1;
+    }
+    .pbar-fill {
+      background: var(--accent);
+      border-radius: 3px;
+      height: 100%;
+      transition: width 0.4s;
+    }
+    .pct { color: var(--muted); font-size: 12px; min-width: 34px; text-align: right; }
+
+    .row-actions { display: flex; gap: 5px; }
+
+    .empty { color: var(--muted); font-size: 13px; padding: 28px; text-align: center; }
+
+    .refresh-hint { color: var(--muted); font-size: 12px; margin-top: 10px; text-align: right; }
+
+    .truncation-warn {
+      background: rgba(255,152,0,.12);
+      border: 1px solid rgba(255,152,0,.35);
+      border-radius: 6px;
+      color: #ffcc80;
+      font-size: 12px;
+      margin-top: 10px;
+      padding: 7px 11px;
+    }
+    .truncation-warn.hidden { display: none; }
+
+    /* ── Toasts ── */
+    #toasts {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 8px;
+      z-index: 999;
+      pointer-events: none;
+    }
+
+    .toast {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 13px;
+      max-width: 340px;
+      padding: 10px 14px;
+      pointer-events: auto;
+      animation: slide-in 0.2s ease;
+    }
+    .toast.success { border-color: var(--success); }
+    .toast.error   { border-color: var(--error); }
+
+    @keyframes slide-in {
+      from { opacity: 0; transform: translateX(30px); }
+      to   { opacity: 1; transform: translateX(0); }
+    }
+
+    /* ── Spinner ── */
+    .spinner {
+      display: inline-block;
+      width: 13px; height: 13px;
+      border: 2px solid rgba(255,255,255,0.3);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.55s linear infinite;
+      margin-right: 7px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── Mobile ── */
+    @media (max-width: 600px) {
+      .dl-row { flex-direction: column; }
+      th:nth-child(4), td:nth-child(4),
+      th:nth-child(5), td:nth-child(5) { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<div id="status-bar">
+  <div id="status-dot" class="dot"></div>
+  <span id="status-text">Checking status…</span>
+</div>
+
+<div id="toasts"></div>
+
+<main>
+  <!-- Download Queue -->
+  <section class="panel">
+    <h2>Download Queue</h2>
+    <textarea
+      id="links"
+      placeholder="Paste Mega links here, one per line&#10;&#10;https://mega.nz/file/...&#10;https://mega.nz/folder/..."
+    ></textarea>
+    <div class="dl-row">
+      <input type="text" id="dest" value="/downloads/" placeholder="Destination path">
+      <button id="dl-btn" onclick="queueDownloads()">Download</button>
+    </div>
+  </section>
+
+  <!-- Transfer Manager -->
+  <section class="panel">
+    <h2>Transfer Manager</h2>
+    <div class="toolbar">
+      <button onclick="bulkAction('pause')">Pause All</button>
+      <button onclick="bulkAction('resume')">Resume All</button>
+      <button class="danger" onclick="bulkAction('cancel')">Cancel All</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Filename</th>
+            <th>Status</th>
+            <th>Progress</th>
+            <th>Speed</th>
+            <th>Size</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="tbody">
+          <tr><td colspan="6" class="empty">Loading transfers…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="truncation-warn hidden" id="truncation-warn">
+      ⚠ Showing 200 transfers — list may be truncated. Cancel or clear completed transfers to see all.
+    </div>
+    <div class="refresh-hint" id="refresh-hint">Auto-refreshes every 5 seconds</div>
+  </section>
+</main>
+
+<script>
+  // ── Escape helpers ─────────────────────────────────────────────────────────
+  function esc(s) {
+    return String(s ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  // ── Toasts ─────────────────────────────────────────────────────────────────
+  function toast(msg, type = 'success', ms = 4000) {
+    const el = document.createElement('div');
+    el.className = `toast ${type}`;
+    el.textContent = msg;
+    document.getElementById('toasts').appendChild(el);
+    setTimeout(() => {
+      el.style.transition = 'opacity 0.3s';
+      el.style.opacity = '0';
+      setTimeout(() => el.remove(), 320);
+    }, ms);
+  }
+
+  // ── Status bar ─────────────────────────────────────────────────────────────
+  async function checkStatus() {
+    try {
+      const { loggedIn, whoami } = await apiFetch('/api/status');
+      document.getElementById('status-dot').className = `dot ${loggedIn ? 'online' : 'offline'}`;
+      document.getElementById('status-text').textContent = loggedIn
+        ? `Logged in as ${whoami}`
+        : `Not logged in — ${whoami}`;
+    } catch {
+      document.getElementById('status-dot').className = 'dot offline';
+      document.getElementById('status-text').textContent = 'MEGAcmd unreachable';
+    }
+  }
+
+  // ── Downloads ──────────────────────────────────────────────────────────────
+  async function queueDownloads() {
+    const links = document.getElementById('links').value
+      .split('\n').map(l => l.trim()).filter(Boolean);
+    if (!links.length) { toast('No links entered', 'error'); return; }
+
+    const btn = document.getElementById('dl-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Queuing…';
+
+    try {
+      const { results } = await apiFetch('/api/download', {
+        method: 'POST',
+        body: JSON.stringify({ links, dest: document.getElementById('dest').value }),
+      });
+
+      const ok  = results.filter(r => r.success);
+      const bad = results.filter(r => !r.success);
+
+      if (ok.length)  toast(`Queued ${ok.length} download${ok.length > 1 ? 's' : ''}`, 'success');
+      for (const r of bad) toast(`Failed: ${r.link.slice(0, 50)}… — ${r.error}`, 'error', 7000);
+
+      if (ok.length) document.getElementById('links').value = '';
+    } catch (err) {
+      toast(`Request failed: ${err.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Download';
+    }
+  }
+
+  // ── Transfer actions ───────────────────────────────────────────────────────
+  async function transferAction(action, tag) {
+    try {
+      const data = await apiFetch(`/api/transfers/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({ tag }),
+      });
+      if (data.success) {
+        const label = tag === 'all' ? 'all transfers' : `transfer ${tag}`;
+        toast(`${cap(action)}d ${label}`, 'success');
+        loadTransfers();
+      } else {
+        toast(data.error || `${cap(action)} failed`, 'error');
+      }
+    } catch (err) {
+      toast(`${cap(action)} failed: ${err.message}`, 'error');
+    }
+  }
+
+  function bulkAction(action) { transferAction(action, 'all'); }
+  function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  // ── Transfer table ─────────────────────────────────────────────────────────
+  function renderTransfers(transfers) {
+    const tbody = document.getElementById('tbody');
+    if (!transfers?.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">No active transfers</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = transfers.map(t => {
+      const pct   = Math.min(parseFloat(t.progress) || 0, 100);
+      const size  = t.transferred && t.total ? `${t.transferred} / ${t.total}` : (t.total || '—');
+      const badge = t.status || 'unknown';
+      return `
+        <tr>
+          <td class="filename-cell" title="${esc(t.filename)}">${esc(t.filename)}</td>
+          <td><span class="badge ${esc(badge)}">${esc(badge)}</span></td>
+          <td>
+            <div class="pbar-wrap">
+              <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
+              <span class="pct">${pct.toFixed(0)}%</span>
+            </div>
+          </td>
+          <td style="color:var(--muted);white-space:nowrap">${esc(t.speed)}</td>
+          <td style="color:var(--muted);white-space:nowrap">${esc(size)}</td>
+          <td>
+            <div class="row-actions">
+              <button class="secondary sm" data-action="pause"  data-tag="${esc(t.tag)}">Pause</button>
+              <button class="secondary sm" data-action="resume" data-tag="${esc(t.tag)}">Resume</button>
+              <button class="danger sm"    data-action="cancel" data-tag="${esc(t.tag)}">Cancel</button>
+            </div>
+          </td>
+        </tr>`;
+    }).join('');
+  }
+
+  // Event delegation for per-row buttons
+  document.getElementById('tbody').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    transferAction(btn.dataset.action, btn.dataset.tag);
+  });
+
+  async function loadTransfers() {
+    try {
+      const { transfers, truncated } = await apiFetch('/api/transfers');
+      renderTransfers(transfers);
+      document.getElementById('truncation-warn').classList.toggle('hidden', !truncated);
+      const now = new Date().toLocaleTimeString();
+      document.getElementById('refresh-hint').textContent =
+        `Last updated: ${now} · Auto-refreshes every 5 seconds`;
+    } catch (err) {
+      document.getElementById('tbody').innerHTML =
+        `<tr><td colspan="6" class="empty">Error: ${esc(err.message)}</td></tr>`;
+    }
+  }
+
+  // ── API helper ─────────────────────────────────────────────────────────────
+  async function apiFetch(url, opts = {}) {
+    const res = await fetch(url, {
+      headers: { 'Content-Type': 'application/json', ...opts.headers },
+      ...opts,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    return data;
+  }
+
+  // ── Ctrl+Enter to submit ───────────────────────────────────────────────────
+  document.getElementById('links').addEventListener('keydown', e => {
+    if (e.key === 'Enter' && e.ctrlKey) queueDownloads();
+  });
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  checkStatus();
+  loadTransfers();
+  setInterval(loadTransfers, 5000);
+  setInterval(checkStatus, 30000);
+</script>
+</body>
+</html>

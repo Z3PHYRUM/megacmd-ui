@@ -1,0 +1,293 @@
+'use strict';
+
+const express = require('express');
+const cors = require('cors');
+const { execFile } = require('child_process');
+const path = require('path');
+
+const app = express();
+const PORT = process.env.PORT || 8085;
+const MEGACMD_CONTAINER = process.env.MEGACMD_CONTAINER || 'megacmd';
+const MOCK = process.env.MOCK === '1';
+const TRANSFER_LIMIT = 200;
+
+if (MOCK) console.log('[MOCK] Running in mock mode — no Docker commands will be executed');
+
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname, 'public')));
+
+// ── Mock state ───────────────────────────────────────────────────────────────
+let mockTransfers = [
+  { tag: '1001', type: '⇓', filename: 'BigMovie.2024.2160p.BluRay.mkv', transferred: '5.20 GB',   total: '10.00 GB',  speed: '4.50 MB/s', progress: '52 %',  state: 'active' },
+  { tag: '1002', type: '⇓', filename: 'AnotherShow.S01E01.zip',         transferred: '120.00 MB', total: '500.00 MB', speed: '0 B/s',     progress: '24 %',  state: 'paused' },
+  { tag: '1003', type: '⇓', filename: 'SmallDocument.pdf',              transferred: '0 B',       total: '2.50 MB',   speed: '0 B/s',     progress: '0 %',   state: 'queued' },
+  { tag: '1004', type: '⇓', filename: 'CorruptArchive.rar',             transferred: '50.00 MB',  total: '50.00 MB',  speed: '0 B/s',     progress: '100 %', state: 'error'  },
+  { tag: '1005', type: '⇑', filename: 'Backup.tar.gz',                  transferred: '200.00 MB', total: '1.00 GB',   speed: '2.10 MB/s', progress: '20 %',  state: 'active' },
+];
+
+const MOCK_HEADER = 'TAG|TYPE|FILENAME|TRANSFERRED|TOTAL|SPEED|PROGRESS|STATE';
+
+function mockTransfersOutput() {
+  const rows = mockTransfers.map(t =>
+    [t.tag, t.type, t.filename, t.transferred, t.total, t.speed, t.progress, t.state].join('|')
+  );
+  return [MOCK_HEADER, ...rows].join('\n');
+}
+
+function applyMockAction(flag, tagArg) {
+  const all = tagArg === '-a';
+  if (flag === '-c') {
+    mockTransfers = all ? [] : mockTransfers.filter(t => t.tag !== tagArg);
+  } else if (flag === '-p') {
+    mockTransfers
+      .filter(t => all || t.tag === tagArg)
+      .forEach(t => { if (t.state !== 'error') t.state = 'paused'; });
+  } else if (flag === '-r') {
+    mockTransfers
+      .filter(t => all || t.tag === tagArg)
+      .forEach(t => { if (t.state === 'paused') t.state = 'active'; });
+  }
+}
+
+// ── Docker / mock exec ────────────────────────────────────────────────────────
+function dockerExec(megaCommand, args = []) {
+  if (MOCK) {
+    console.log(`[MOCK] ${megaCommand} ${args.join(' ')}`);
+    if (megaCommand === 'mega-whoami') return Promise.resolve('user@example.com');
+    if (megaCommand === 'mega-get') {
+      const link = args[0] || '';
+      mockTransfers.push({
+        tag: String(Date.now()).slice(-4),
+        type: '⇓',
+        filename: decodeURIComponent(link.split('/').pop() || 'queued-download'),
+        transferred: '0 B', total: 'Unknown', speed: '0 B/s', progress: '0 %', state: 'queued',
+      });
+      return Promise.resolve('Download enqueued');
+    }
+    if (megaCommand === 'mega-transfers') {
+      // Action calls start with -p / -r / -c; list calls start with --limit
+      if (['-p', '-r', '-c'].includes(args[0])) {
+        applyMockAction(args[0], args[1]);
+        return Promise.resolve('');
+      }
+      return Promise.resolve(mockTransfersOutput());
+    }
+    return Promise.resolve('');
+  }
+
+  return new Promise((resolve, reject) => {
+    const dockerArgs = ['exec', MEGACMD_CONTAINER, megaCommand, ...args];
+    console.log(`[CMD] docker ${dockerArgs.join(' ')}`);
+    execFile('docker', dockerArgs, { timeout: 10000 }, (err, stdout, stderr) => {
+      if (stdout) console.log(`[OUT] ${stdout.trim()}`);
+      if (stderr) console.log(`[ERR] ${stderr.trim()}`);
+      if (err) { reject(new Error(stderr || err.message)); return; }
+      resolve(stdout);
+    });
+  });
+}
+
+// ── Transfer parsing ──────────────────────────────────────────────────────────
+// Maps header strings to internal field names (case-insensitive prefix match).
+const COL_MAP = [
+  [['tag'],                      'tag'],
+  [['type'],                     'type'],
+  [['filename', 'name', 'path'], 'filename'],
+  [['transferred'],              'transferred'],
+  [['total'],                    'total'],
+  [['speed'],                    'speed'],
+  [['progress'],                 'progress'],
+  [['state', 'status'],          'state'],
+];
+
+function mapHeaders(headers) {
+  return headers.map(h => {
+    const lower = h.toLowerCase().trim();
+    for (const [aliases, field] of COL_MAP) {
+      if (aliases.some(a => lower.startsWith(a))) return field;
+    }
+    return null;
+  });
+}
+
+// Primary parser: expects pipe-separated output from --col-separator=|
+function parsePipeTransfers(raw) {
+  const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return [];
+
+  const fieldMap = mapHeaders(lines[0].split('|'));
+  const get = (parts, name) => {
+    const i = fieldMap.indexOf(name);
+    return i >= 0 ? (parts[i] || '').trim() : '';
+  };
+
+  const transfers = [];
+  for (let i = 1; i < lines.length; i++) {
+    const parts = lines[i].split('|');
+    const typeVal    = get(parts, 'type');
+    const direction  = typeToDirection(typeVal);
+    const stateRaw   = get(parts, 'state');
+    const progressRaw = get(parts, 'progress');
+    const pMatch     = progressRaw.match(/(\d+(?:\.\d+)?)/);
+
+    transfers.push({
+      tag:         get(parts, 'tag'),
+      direction,
+      filename:    get(parts, 'filename'),
+      progress:    pMatch ? parseFloat(pMatch[1]) : 0,
+      speed:       get(parts, 'speed') || '0 B/s',
+      transferred: get(parts, 'transferred'),
+      total:       get(parts, 'total'),
+      status:      normalizeStatus(stateRaw, direction),
+    });
+  }
+
+  return transfers.filter(t => t.tag || t.filename);
+}
+
+// Fallback parser for space-padded output (if --col-separator isn't available).
+function parseLegacyTransfers(raw) {
+  const lines = raw.split('\n');
+  const transfers = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || /^(DIR|TAG|TYPE|\s*-+)/i.test(trimmed)) continue;
+
+    const parts = trimmed.split(/\s{2,}/);
+    if (parts.length < 3) continue;
+
+    const first = parts[0].trim(), second = (parts[1] || '').trim();
+    let tag, direction, filename, statsStr;
+
+    if (/^[DU⇓⇑⇵⏫]/.test(first)) {
+      direction = typeToDirection(first);
+      tag = second; filename = (parts[2] || '').trim(); statsStr = parts.slice(3).join('  ');
+    } else if (/^(download|upload)/i.test(second)) {
+      tag = first; direction = /^d/i.test(second) ? 'Downloading' : 'Uploading';
+      filename = (parts[2] || '').trim(); statsStr = parts.slice(3).join('  ');
+    } else if (/^\d+$/.test(first)) {
+      tag = first; direction = 'Downloading'; filename = second; statsStr = parts.slice(2).join('  ');
+    } else continue;
+
+    const pMatch  = statsStr.match(/(\d+(?:\.\d+)?)\s*%/);
+    const spMatch = statsStr.match(/\d+(?:\.\d+)?\s*[KMGT]?B\/s/i);
+    const stMatch = statsStr.match(/\b(active|paus(?:ed)?|queued?|error|fail(?:ed)?|complet(?:e|ed)?|finish(?:ed)?)\b/i);
+    const slash   = statsStr.match(/(\d+(?:\.\d+)?\s*[KMGT]?B)\s*\/\s*(\d+(?:\.\d+)?\s*[KMGT]?B)/i);
+    const sizes   = [...statsStr.matchAll(/\d+(?:\.\d+)?\s*[KMGT]?B(?!\s*\/s)/gi)];
+
+    transfers.push({
+      tag: tag || '', direction, filename: filename || '',
+      progress:    pMatch  ? parseFloat(pMatch[1]) : 0,
+      speed:       spMatch ? spMatch[0].trim() : '0 B/s',
+      transferred: slash ? slash[1].trim() : (sizes[0] ? sizes[0][0].trim() : ''),
+      total:       slash ? slash[2].trim() : (sizes[1] ? sizes[1][0].trim() : ''),
+      status:      normalizeStatus(stMatch ? stMatch[1] : '', direction),
+    });
+  }
+  return transfers;
+}
+
+function parseTransfers(raw) {
+  const firstLine = raw.split('\n').find(l => l.trim()) || '';
+  return firstLine.includes('|') ? parsePipeTransfers(raw) : parseLegacyTransfers(raw);
+}
+
+function typeToDirection(type) {
+  if (/[⇓⇵]/.test(type) || /^[dD]/.test(type)) return 'Downloading';
+  if (/[⇑⏫]/.test(type) || /^[uU]/.test(type)) return 'Uploading';
+  return 'Downloading';
+}
+
+function normalizeStatus(state, direction) {
+  const s = state.toLowerCase().trim();
+  if (!s) return 'unknown';
+  if (s === 'active') return direction === 'Uploading' ? 'uploading' : 'downloading';
+  if (s.includes('paus'))   return 'paused';
+  if (s.includes('queue'))  return 'queued';
+  if (s.includes('error') || s.includes('fail')) return 'error';
+  if (s.includes('complet') || s.includes('finish')) return 'complete';
+  if (s.includes('download')) return 'downloading';
+  if (s.includes('upload'))   return 'uploading';
+  return s;
+}
+
+// ── API routes ────────────────────────────────────────────────────────────────
+app.get('/api/status', async (req, res) => {
+  try {
+    const whoami  = await dockerExec('mega-whoami');
+    const text    = whoami.trim();
+    const loggedIn = text.length > 0 && !/not logged/i.test(text);
+    res.json({ loggedIn, whoami: text });
+  } catch (err) {
+    res.json({ loggedIn: false, whoami: err.message });
+  }
+});
+
+app.post('/api/download', async (req, res) => {
+  const { links, dest } = req.body;
+  if (!Array.isArray(links) || links.length === 0)
+    return res.status(400).json({ error: 'No links provided' });
+
+  const destination = (typeof dest === 'string' && dest.trim()) ? dest.trim() : '/downloads/';
+  const results = [];
+
+  for (const rawLink of links) {
+    const link = typeof rawLink === 'string' ? rawLink.trim() : '';
+    if (!link) continue;
+    try {
+      await dockerExec('mega-get', [link, destination]);
+      results.push({ link, success: true });
+    } catch (err) {
+      results.push({ link, success: false, error: err.message });
+    }
+  }
+
+  res.json({ results });
+});
+
+app.get('/api/transfers', async (req, res) => {
+  try {
+    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
+    const transfers = parseTransfers(raw);
+    res.json({ transfers, truncated: transfers.length >= TRANSFER_LIMIT });
+  } catch (err) {
+    res.status(500).json({ error: err.message, transfers: [], truncated: false });
+  }
+});
+
+app.post('/api/transfers/pause', async (req, res) => {
+  const { tag } = req.body;
+  try {
+    await dockerExec('mega-transfers', tag === 'all' ? ['-p', '-a'] : ['-p', String(tag)]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/transfers/resume', async (req, res) => {
+  const { tag } = req.body;
+  try {
+    await dockerExec('mega-transfers', tag === 'all' ? ['-r', '-a'] : ['-r', String(tag)]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/transfers/cancel', async (req, res) => {
+  const { tag } = req.body;
+  try {
+    await dockerExec('mega-transfers', tag === 'all' ? ['-c', '-a'] : ['-c', String(tag)]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`MEGAcmd UI running on port ${PORT}`);
+  console.log(`MEGACMD_CONTAINER: ${MEGACMD_CONTAINER}`);
+});
