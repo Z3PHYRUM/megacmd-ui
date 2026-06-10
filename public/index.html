@@ -200,7 +200,7 @@
     .badge.paused      { background: rgba(255,184,108,.2);  color: #ffb86c; }
     .badge.queued,
     .badge.pending     { background: rgba(255,255,255,.08); color: var(--muted); }
-    .badge.retrying    { background: rgba(189,147,249,.2);  color: #bd93f9; }
+    .badge.retrying    { background: rgba(255,184,108,.2);  color: #ffb86c; }
     .badge.error       { background: rgba(255,85,85,.2);    color: #ff5555; }
     .badge.complete    { background: rgba(80,250,123,.2);   color: #50fa7b; }
     .badge.unknown     { background: rgba(255,255,255,.06); color: var(--muted); }
@@ -522,13 +522,12 @@
             <th>Filename</th>
             <th>Status</th>
             <th>Progress</th>
-            <th>Speed</th>
             <th>Size</th>
             <th>Actions</th>
           </tr>
         </thead>
         <tbody id="tbody">
-          <tr><td colspan="6" class="empty">Loading transfers…</td></tr>
+          <tr><td colspan="5" class="empty">Loading transfers…</td></tr>
         </tbody>
       </table>
     </div>
@@ -786,7 +785,7 @@
     const tbody   = document.getElementById('tbody');
     const statsEl = document.getElementById('transfer-stats');
     if (!transfers?.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty">No active transfers</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">No active transfers</td></tr>';
       statsEl.classList.add('hidden');
       return;
     }
@@ -804,12 +803,12 @@
       counts[t.status] = (counts[t.status] || 0) + 1;
       totalBytes += parseBytes(t.total);
     }
-    const statParts = [`<strong>${transfers.length}</strong> transfer${transfers.length !== 1 ? 's' : ''}`];
+    const statParts = [`<span><strong>${transfers.length}</strong> transfer${transfers.length !== 1 ? 's' : ''}</span>`];
     const ORDER = ['downloading', 'uploading', 'queued', 'paused', 'error', 'complete'];
     for (const s of [...ORDER, ...Object.keys(counts).filter(k => !ORDER.includes(k))]) {
-      if (counts[s]) statParts.push(`<strong>${counts[s]}</strong> ${s}`);
+      if (counts[s]) statParts.push(`<span><strong>${counts[s]}</strong> ${s}</span>`);
     }
-    if (totalBytes > 0) statParts.push(`<strong>${fmtBytes(totalBytes)}</strong> total`);
+    if (totalBytes > 0) statParts.push(`<span><strong>${fmtBytes(totalBytes)}</strong> total</span>`);
     statsEl.innerHTML = statParts.join('<span class="sep">·</span>');
     statsEl.classList.remove('hidden');
 
@@ -833,7 +832,6 @@
           <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
           <span class="pct">${pct.toFixed(0)}%</span>
         </div></td>
-        <td style="color:var(--muted);white-space:nowrap">${esc(t.speed) || '—'}</td>
         <td style="color:var(--muted);white-space:nowrap">${esc(size)}</td>
         <td><div class="row-actions">${actions}</div></td>
       </tr>`;
@@ -855,7 +853,7 @@
         `Last updated: ${new Date().toLocaleTimeString()} · Auto-refreshes every 5 seconds`;
     } catch (err) {
       document.getElementById('tbody').innerHTML =
-        `<tr><td colspan="6" class="empty">Error: ${esc(err.message)}</td></tr>`;
+        `<tr><td colspan="5" class="empty">Error: ${esc(err.message)}</td></tr>`;
     }
   }
 
