@@ -204,6 +204,8 @@
     .badge.error       { background: rgba(255,85,85,.2);    color: #ff5555; }
     .badge.complete    { background: rgba(80,250,123,.2);   color: #50fa7b; }
     .badge.unknown     { background: rgba(255,255,255,.06); color: var(--muted); }
+    .badge.starting    { background: rgba(255,255,255,.08); color: var(--muted); }
+    .badge.cancelled   { background: rgba(255,85,85,.2);    color: #ff5555; }
 
     .pbar-wrap { display: flex; align-items: center; gap: 8px; }
     .pbar {
@@ -600,6 +602,30 @@
     ></textarea>
     <div class="dl-row">
       <button id="aria2-dl-btn" onclick="queueAria2Downloads()">Download</button>
+    </div>
+  </section>
+
+  <!-- YouTube Downloads -->
+  <section class="panel">
+    <h2>YouTube Downloads</h2>
+    <div class="dl-row">
+      <input type="text" id="youtube-url" placeholder="https://www.youtube.com/watch?v=...">
+      <button id="youtube-dl-btn" onclick="queueYoutubeDownload()">Download</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Filename</th>
+            <th>Status</th>
+            <th>Progress</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="youtube-tbody">
+          <tr><td colspan="4" class="empty">No YouTube downloads</td></tr>
+        </tbody>
+      </table>
     </div>
   </section>
 
@@ -1370,6 +1396,75 @@
     }
   }
 
+  // ── YouTube downloads ────────────────────────────────────────────────────────
+  async function queueYoutubeDownload() {
+    const input = document.getElementById('youtube-url');
+    const url = input.value.trim();
+    if (!url) { toast('Enter a YouTube URL', 'error'); return; }
+
+    const btn = document.getElementById('youtube-dl-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Queuing…';
+    try {
+      await apiFetch('/api/youtube/add', { method: 'POST', body: JSON.stringify({ url }) });
+      toast('YouTube download queued', 'success');
+      input.value = '';
+      loadYoutubeJobs();
+    } catch (err) {
+      toast(`Request failed: ${err.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Download';
+    }
+  }
+
+  async function youtubeAction(action, id) {
+    try {
+      await apiFetch(`/api/youtube/${action}`, { method: 'POST', body: JSON.stringify({ id }) });
+      loadYoutubeJobs();
+    } catch (err) {
+      toast(`${cap(action)} failed: ${err.message}`, 'error');
+    }
+  }
+
+  function renderYoutubeJobs(jobs) {
+    const tbody = document.getElementById('youtube-tbody');
+    if (!jobs?.length) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty">No YouTube downloads</td></tr>';
+      return;
+    }
+    tbody.innerHTML = jobs.map(j => {
+      const pct = Math.min(j.progress || 0, 100);
+      const isDone = ['complete', 'error', 'cancelled'].includes(j.status);
+      const badgeText = j.status === 'complete' ? 'Complete!' : j.status;
+      const actions = isDone
+        ? `<button class="secondary sm" data-action="dismiss" data-id="${esc(j.id)}">Dismiss</button>`
+        : `<button class="danger sm" data-action="cancel" data-id="${esc(j.id)}">Cancel</button>`;
+      return `<tr>
+        <td class="filename-cell" title="${esc(j.error || j.filename)}">${esc(j.filename)}</td>
+        <td><span class="badge ${esc(j.status)}">${esc(badgeText)}</span></td>
+        <td><div class="pbar-wrap">
+          <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
+          <span class="pct">${pct.toFixed(0)}%</span>
+        </div></td>
+        <td><div class="row-actions">${actions}</div></td>
+      </tr>`;
+    }).join('');
+  }
+
+  document.getElementById('youtube-tbody').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    youtubeAction(btn.dataset.action, btn.dataset.id);
+  });
+
+  async function loadYoutubeJobs() {
+    try {
+      const { jobs } = await apiFetch('/api/youtube/jobs');
+      renderYoutubeJobs(jobs);
+    } catch {}
+  }
+
   // ── Retry queue ──────────────────────────────────────────────────────────--
   let countdownInterval = null;
   let nextRetryTs = null;
@@ -1512,6 +1607,7 @@
   loadQueue();
   loadLog();
   loadAria2Transfers();
+  loadYoutubeJobs();
 
   setInterval(loadTransfers, 5000);
   setInterval(loadQueue, 5000);
@@ -1519,6 +1615,7 @@
   setInterval(updateCountdown, 1000);
   setInterval(checkStatus, 30000);
   setInterval(loadAria2Transfers, 5000);
+  setInterval(loadYoutubeJobs, 2000);
 
   // Scroll history to bottom on first load
   setTimeout(() => {

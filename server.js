@@ -5,6 +5,7 @@ const cors = require('cors');
 const Docker = require('dockerode');
 const fs = require('fs');
 const path = require('path');
+const { spawn } = require('child_process');
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
@@ -17,6 +18,8 @@ const RETRY_INTERVAL_MS  = (parseInt(process.env.RETRY_INTERVAL_MIN) || 15) * 60
 const DATA_DIR           = process.env.DATA_DIR || __dirname;
 const QUEUE_FILE         = path.join(DATA_DIR, 'queue.json');
 const LOG_FILE           = path.join(DATA_DIR, 'activity.log');
+const YTDLP_BIN          = process.env.YTDLP_BIN || 'yt-dlp';
+const YTDLP_OUTPUT_DIR   = process.env.YTDLP_OUTPUT_DIR || '/downloads/';
 
 if (MOCK) console.log('[MOCK] Running in mock mode — no Docker commands will be executed');
 
@@ -256,6 +259,79 @@ async function fetchArchiveMetadata(identifier) {
   if (!data || !Array.isArray(data.files) || !data.files.length)
     throw new Error('No files found for this archive.org item');
   return data;
+}
+
+// ── YouTube (yt-dlp) ──────────────────────────────────────────────────────────
+const YOUTUBE_URL_RE = /^https?:\/\/(www\.|m\.)?(youtube\.com|youtu\.be)\//i;
+const YTDLP_FORMAT = 'bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b';
+
+let ytJobId = 0;
+const ytJobs = [];
+
+function serializeYtJob(job) {
+  const { id, url, filename, status, progress, error } = job;
+  return { id, url, filename, status, progress, error };
+}
+
+function spawnYoutubeDownload(url) {
+  const job = {
+    id: String(++ytJobId),
+    url,
+    filename: 'Fetching info…',
+    status: 'starting',
+    progress: 0,
+    error: '',
+    proc: null,
+    stderrTail: '',
+  };
+  ytJobs.push(job);
+
+  const proc = spawn(YTDLP_BIN, [
+    '-f', YTDLP_FORMAT,
+    '--merge-output-format', 'mp4',
+    '--newline',
+    '--no-playlist',
+    '-o', path.join(YTDLP_OUTPUT_DIR, '%(title)s.%(ext)s'),
+    url,
+  ]);
+  job.proc = proc;
+  job.status = 'downloading';
+
+  let stdoutBuf = '';
+  proc.stdout.on('data', chunk => {
+    stdoutBuf += chunk.toString();
+    const lines = stdoutBuf.split('\n');
+    stdoutBuf = lines.pop();
+    for (const line of lines) {
+      const dest = line.match(/^\[download\] Destination:\s+(.+)$/) || line.match(/^\[Merger\] Merging formats into "(.+)"$/);
+      if (dest) job.filename = basename(dest[1]);
+      const pct = line.match(/^\[download\]\s+([\d.]+)%/);
+      if (pct) job.progress = parseFloat(pct[1]);
+    }
+  });
+  proc.stderr.on('data', chunk => {
+    job.stderrTail = (job.stderrTail + chunk.toString()).slice(-2000);
+  });
+  proc.on('close', code => {
+    job.proc = null;
+    if (code === 0) {
+      job.status = 'complete';
+      job.progress = 100;
+      logActivity('YOUTUBE_DOWNLOADED', url, job.filename);
+    } else if (job.status !== 'cancelled') {
+      job.status = 'error';
+      job.error = (job.stderrTail.trim().split('\n').pop() || `yt-dlp exited with code ${code}`).replace(/^ERROR:\s*/, '');
+      logActivity('YOUTUBE_FAILED', url, job.error);
+    }
+  });
+  proc.on('error', err => {
+    job.proc = null;
+    job.status = 'error';
+    job.error = err.message;
+    logActivity('YOUTUBE_FAILED', url, err.message);
+  });
+
+  return job;
 }
 
 // ── Transfer parsing ──────────────────────────────────────────────────────────
@@ -824,6 +900,39 @@ app.post('/api/aria2/cancel', async (req, res) => {
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// ── YouTube routes ────────────────────────────────────────────────────────────
+app.post('/api/youtube/add', (req, res) => {
+  const { url } = req.body;
+  if (typeof url !== 'string' || !YOUTUBE_URL_RE.test(url.trim()))
+    return res.status(400).json({ error: 'Not a youtube.com or youtu.be URL' });
+
+  const job = spawnYoutubeDownload(url.trim());
+  logActivity('YOUTUBE_QUEUED', url.trim());
+  res.json({ job: serializeYtJob(job) });
+});
+
+app.get('/api/youtube/jobs', (req, res) => {
+  res.json({ jobs: ytJobs.map(serializeYtJob) });
+});
+
+app.post('/api/youtube/cancel', (req, res) => {
+  const { id } = req.body;
+  const job = ytJobs.find(j => j.id === id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  if (job.proc) {
+    job.status = 'cancelled';
+    job.proc.kill('SIGTERM');
+  }
+  res.json({ success: true });
+});
+
+app.post('/api/youtube/dismiss', (req, res) => {
+  const { id } = req.body;
+  const idx = ytJobs.findIndex(j => j.id === id);
+  if (idx !== -1) ytJobs.splice(idx, 1);
+  res.json({ success: true });
 });
 
 // ── Log routes ────────────────────────────────────────────────────────────────

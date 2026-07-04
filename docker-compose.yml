@@ -7,6 +7,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - megacmd-ui-data:/data
+      - /mnt/media1/downloads:/downloads
     environment:
       - MEGACMD_CONTAINER=megacmd
       - ARIA2_RPC_URL=http://aria2:6800/jsonrpc
