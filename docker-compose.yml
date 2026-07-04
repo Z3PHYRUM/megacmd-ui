@@ -9,6 +9,23 @@ services:
       - megacmd-ui-data:/data
     environment:
       - MEGACMD_CONTAINER=megacmd
+      - ARIA2_RPC_URL=http://aria2:6800/jsonrpc
+      - ARIA2_RPC_SECRET=${ARIA2_RPC_SECRET}
+    restart: unless-stopped
+
+  aria2:
+    image: p3terx/aria2-pro
+    container_name: aria2
+    ports:
+      - "6800:6800"
+    volumes:
+      - /opt/docker/aria2:/config
+      - /mnt/media1/downloads:/downloads
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - RPC_SECRET=${ARIA2_RPC_SECRET}
+      - RPC_PORT=6800
     restart: unless-stopped
 
 volumes:

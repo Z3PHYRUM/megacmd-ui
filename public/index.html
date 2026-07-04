@@ -249,6 +249,22 @@
                      padding: 6px 11px; color: var(--muted); }
     .dl-error-item strong { color: #ff5555; display: block; margin-bottom: 2px; }
 
+    /* ── Needs attention ── */
+    .attention-item {
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      padding: 8px 11px;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+    }
+    .attention-item:first-child { border-top: none; }
+    .attention-item a { color: var(--accent); word-break: break-all; }
+    .attention-item .attention-note { color: var(--warn); display: block; margin-bottom: 2px; }
+    .attention-item .attention-raw { word-break: break-all; }
+
     /* ── Truncation warning ── */
     .truncation-warn {
       background: rgba(255,184,108,.12);
@@ -458,6 +474,45 @@
   </div>
 </div>
 
+<!-- Archive.org file picker modal -->
+<div id="archive-overlay" class="browse-overlay hidden">
+  <div class="browse-modal">
+    <div class="browse-header">
+      <span>Select Files to Download</span>
+      <button class="icon" id="archive-close" title="Cancel">✕</button>
+    </div>
+    <div class="browse-body">
+      <div id="archive-loading" class="browse-loading" style="display:none">
+        <span class="spinner"></span>Fetching file list…
+      </div>
+      <div id="archive-content" style="display:none; flex-direction:column; gap:10px; flex:1; min-height:0;">
+        <div class="toolbar" style="margin:0">
+          <button class="secondary sm" onclick="archiveSelectAll(true)">Select All</button>
+          <button class="secondary sm" onclick="archiveSelectAll(false)">Select None</button>
+          <span class="countdown" id="archive-count"></span>
+        </div>
+        <div class="browse-file-wrap table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:34px;padding:8px 6px 8px 11px"></th>
+                <th>File</th>
+                <th>Size</th>
+              </tr>
+            </thead>
+            <tbody id="archive-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="archive-error" class="dl-errors hidden"></div>
+    </div>
+    <div class="browse-footer">
+      <button class="secondary" id="archive-cancel-btn">Cancel</button>
+      <button id="archive-confirm-btn" disabled>Download Selected</button>
+    </div>
+  </div>
+</div>
+
 <main>
   <!-- Download Queue -->
   <section class="panel">
@@ -476,6 +531,24 @@
         <button onclick="clearDlErrors()" title="Dismiss">×</button>
       </div>
       <div id="dl-errors-body"></div>
+    </div>
+  </section>
+
+  <!-- Needs Attention (hidden when empty) -->
+  <section class="panel hidden" id="attention-panel">
+    <div class="panel-header">
+      <h2>Needs Attention <span id="attention-count" style="font-weight:400;opacity:0.6"></span></h2>
+      <button class="secondary sm" onclick="clearAttention()">Clear All</button>
+    </div>
+    <div id="attention-list"></div>
+  </section>
+
+  <!-- Archive.org Downloads -->
+  <section class="panel">
+    <h2>Archive.org Downloads</h2>
+    <div class="dl-row">
+      <input type="text" id="archive-url" placeholder="https://archive.org/details/some-item">
+      <button id="archive-btn" onclick="browseArchive()">Browse</button>
     </div>
   </section>
 
@@ -537,6 +610,34 @@
     <div class="refresh-hint" id="refresh-hint">Auto-refreshes every 5 seconds</div>
   </section>
 
+  <!-- aria2 Downloads -->
+  <section class="panel">
+    <h2>aria2 Downloads</h2>
+    <div class="toolbar">
+      <button onclick="aria2BulkAction('pause')">Pause All</button>
+      <button onclick="aria2BulkAction('resume')">Resume All</button>
+      <button class="danger" onclick="aria2BulkAction('cancel')">Cancel All</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Filename</th>
+            <th>Status</th>
+            <th>Progress</th>
+            <th>Speed</th>
+            <th>Size</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="aria2-tbody">
+          <tr><td colspan="6" class="empty">Loading transfers…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="refresh-hint" id="aria2-refresh-hint">Auto-refreshes every 5 seconds</div>
+  </section>
+
   <!-- History -->
   <section class="panel" id="history-panel">
     <div class="panel-header">
@@ -589,11 +690,81 @@
     }
   }
 
+  // ── Needs attention (base64 decode failures) ────────────────────────────────
+  let needsAttention = [];
+
+  function isPrintableText(s) {
+    if (!s) return false;
+    let printable = 0;
+    for (let i = 0; i < s.length; i++) {
+      const c = s.charCodeAt(i);
+      if ((c >= 0x20 && c <= 0x7e) || c === 9 || c === 10 || c === 13) printable++;
+    }
+    return printable / s.length > 0.95;
+  }
+
+  function decodeMaybeBase64Line(line) {
+    if (!/^[A-Za-z0-9+/=]+$/.test(line) || line.length <= 20 || /^https:\/\//i.test(line)) return null;
+    let decoded;
+    try { decoded = atob(line); } catch { return { kind: 'garbage', value: line }; }
+    if (!isPrintableText(decoded)) return { kind: 'garbage', value: line };
+    if (/^https:\/\/mega\.nz\//i.test(decoded)) return { kind: 'mega', value: decoded };
+    if (/^https?:\/\//i.test(decoded)) return { kind: 'url', value: decoded };
+    return { kind: 'garbage', value: line };
+  }
+
+  function renderAttention() {
+    const panel = document.getElementById('attention-panel');
+    panel.classList.toggle('hidden', !needsAttention.length);
+    if (!needsAttention.length) return;
+    document.getElementById('attention-count').textContent =
+      `(${needsAttention.length} item${needsAttention.length !== 1 ? 's' : ''})`;
+    document.getElementById('attention-list').innerHTML = needsAttention.map((item, idx) => {
+      const body = item.kind === 'url'
+        ? `<span class="attention-note">${esc(item.note)}</span><a href="${esc(item.value)}" target="_blank" rel="noopener noreferrer">${esc(item.value)}</a>`
+        : `<span class="attention-note">${esc(item.note)}</span><span class="attention-raw">${esc(item.value)}</span>`;
+      return `<div class="attention-item">
+        <div>${body}</div>
+        <button class="icon sm" data-attention-idx="${idx}" title="Dismiss">✕</button>
+      </div>`;
+    }).join('');
+  }
+
+  function clearAttention() {
+    needsAttention = [];
+    renderAttention();
+  }
+
+  document.getElementById('attention-list').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-attention-idx]');
+    if (!btn) return;
+    needsAttention.splice(Number(btn.dataset.attentionIdx), 1);
+    renderAttention();
+  });
+
   // ── Downloads ───────────────────────────────────────────────────────────────
   async function queueDownloads() {
-    const all = document.getElementById('links').value
+    const rawLines = document.getElementById('links').value
       .split('\n').map(l => l.trim()).filter(Boolean);
-    if (!all.length) { toast('No links entered', 'error'); return; }
+    if (!rawLines.length) { toast('No links entered', 'error'); return; }
+
+    const all = [];
+    let attentionAdded = false;
+    for (const line of rawLines) {
+      const decoded = decodeMaybeBase64Line(line);
+      if (!decoded) { all.push(line); continue; }
+      if (decoded.kind === 'mega') { all.push(decoded.value); continue; }
+      needsAttention.push({
+        kind: decoded.kind,
+        value: decoded.value,
+        note: decoded.kind === 'url'
+          ? 'Follow this link to get the MEGA URL'
+          : 'Could not decode this line into a usable link',
+      });
+      attentionAdded = true;
+    }
+    if (attentionAdded) renderAttention();
+    if (!all.length) return;
 
     const dest    = document.getElementById('dest').value;
     const folders = all.filter(l => /mega\.nz\/folder\//i.test(l));
@@ -714,6 +885,92 @@
     if (tags.length)
       await apiFetch('/api/browse/confirm', { method: 'POST', body: JSON.stringify({ keep: [], cancel: tags }) }).catch(() => {});
     document.getElementById('browse-overlay').classList.add('hidden');
+  }
+
+  // ── Archive.org file picker ─────────────────────────────────────────────────
+  let archiveIdentifier = null;
+
+  function browseArchive() {
+    const url = document.getElementById('archive-url').value.trim();
+    if (!url) { toast('Enter an archive.org URL', 'error'); return; }
+    openArchivePicker(url);
+  }
+
+  function openArchivePicker(url) {
+    const overlay = document.getElementById('archive-overlay');
+    overlay.classList.remove('hidden');
+    document.getElementById('archive-loading').style.display = 'block';
+    document.getElementById('archive-content').style.display = 'none';
+    document.getElementById('archive-error').classList.add('hidden');
+    document.getElementById('archive-confirm-btn').disabled = true;
+
+    apiFetch('/api/archive/browse', { method: 'POST', body: JSON.stringify({ url }) })
+      .then(({ identifier, files }) => {
+        document.getElementById('archive-loading').style.display = 'none';
+        renderArchiveFiles(files, identifier);
+        document.getElementById('archive-content').style.display = 'flex';
+        document.getElementById('archive-confirm-btn').disabled = false;
+        updateArchiveCount();
+      })
+      .catch(err => {
+        document.getElementById('archive-loading').style.display = 'none';
+        const el = document.getElementById('archive-error');
+        el.innerHTML = `<div class="dl-errors-header"><span>${esc(err.message)}</span></div>`;
+        el.classList.remove('hidden');
+      });
+  }
+
+  function renderArchiveFiles(files, identifier) {
+    archiveIdentifier = identifier;
+    document.getElementById('archive-tbody').innerHTML = files.map(f => `<tr>
+        <td style="padding:7px 6px 7px 11px">
+          <input type="checkbox" class="archive-cb" data-name="${esc(f.name)}" checked>
+        </td>
+        <td class="filename-cell" title="${esc(f.name)}">${esc(f.name)}</td>
+        <td style="color:var(--muted);white-space:nowrap;font-size:12px">${esc(fmtBytes(Number(f.size) || 0))}</td>
+      </tr>`).join('');
+    document.getElementById('archive-tbody').querySelectorAll('.archive-cb')
+      .forEach(cb => cb.addEventListener('change', updateArchiveCount));
+  }
+
+  function updateArchiveCount() {
+    const all     = document.querySelectorAll('.archive-cb').length;
+    const checked = document.querySelectorAll('.archive-cb:checked').length;
+    document.getElementById('archive-count').textContent = `${checked} / ${all} selected`;
+  }
+
+  function archiveSelectAll(select) {
+    document.querySelectorAll('.archive-cb').forEach(cb => { cb.checked = select; });
+    updateArchiveCount();
+  }
+
+  async function archiveConfirm() {
+    const files = [...document.querySelectorAll('.archive-cb:checked')].map(cb => cb.dataset.name);
+    if (!files.length) { toast('No files selected', 'error'); return; }
+    const btn = document.getElementById('archive-confirm-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Queuing…';
+    try {
+      const { results } = await apiFetch('/api/archive/confirm', {
+        method: 'POST', body: JSON.stringify({ identifier: archiveIdentifier, files }),
+      });
+      const ok  = results.filter(r => r.success);
+      const bad = results.filter(r => !r.success);
+      if (ok.length) toast(`Queued ${ok.length} archive.org download${ok.length !== 1 ? 's' : ''}`, 'success');
+      if (bad.length) toast(`${bad.length} file${bad.length !== 1 ? 's' : ''} failed to queue`, 'error');
+      document.getElementById('archive-overlay').classList.add('hidden');
+      document.getElementById('archive-url').value = '';
+      loadAria2Transfers();
+    } catch (err) {
+      toast(`Error: ${err.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Download Selected';
+    }
+  }
+
+  function archiveDismiss() {
+    document.getElementById('archive-overlay').classList.add('hidden');
   }
 
   // ── Download error panel ─────────────────────────────────────────────────--
@@ -857,6 +1114,75 @@
     }
   }
 
+  // ── aria2 transfers ──────────────────────────────────────────────────────--
+  async function aria2Action(action, gid) {
+    try {
+      const data = await apiFetch(`/api/aria2/${action}`, {
+        method: 'POST', body: JSON.stringify({ gid }),
+      });
+      if (data.success) {
+        toast(`${cap(action)}d ${gid === 'all' ? 'all downloads' : `download ${gid}`}`, 'success');
+        loadAria2Transfers();
+      } else {
+        toast(data.error || `${cap(action)} failed`, 'error');
+      }
+    } catch (err) {
+      toast(`${cap(action)} failed: ${err.message}`, 'error');
+    }
+  }
+
+  function aria2BulkAction(action) { aria2Action(action, 'all'); }
+
+  function renderAria2Transfers(transfers) {
+    const tbody = document.getElementById('aria2-tbody');
+    if (!transfers?.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">No aria2 downloads</td></tr>';
+      return;
+    }
+    tbody.innerHTML = transfers.map(t => {
+      const pct = Math.min(t.progress || 0, 100);
+      const badge = t.status || 'unknown';
+      const isComplete = t.status === 'complete';
+      const canPause   = ['downloading', 'queued'].includes(t.status);
+      const canResume  = t.status === 'paused';
+      const badgeText  = isComplete ? 'Complete!' : badge;
+      const actions    = isComplete
+        ? `<button class="success sm" data-action="cancel" data-gid="${esc(t.gid)}">Dismiss</button>`
+        : `<button class="secondary sm" data-action="pause"  data-gid="${esc(t.gid)}" ${canPause  ? '' : 'disabled'}>Pause</button>
+           <button class="${canResume ? '' : 'secondary '}sm" data-action="resume" data-gid="${esc(t.gid)}" ${canResume ? '' : 'disabled'}>Resume</button>
+           <button class="danger sm"    data-action="cancel" data-gid="${esc(t.gid)}">Cancel</button>`;
+      return `<tr>
+        <td class="filename-cell" title="${esc(t.filename)}">${esc(t.filename)}</td>
+        <td><span class="badge ${esc(badge)}">${esc(badgeText)}</span></td>
+        <td><div class="pbar-wrap">
+          <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
+          <span class="pct">${pct.toFixed(0)}%</span>
+        </div></td>
+        <td style="color:var(--muted);white-space:nowrap">${esc(fmtBytes(t.speed || 0))}/s</td>
+        <td style="color:var(--muted);white-space:nowrap">${esc(fmtBytes(t.total || 0))}</td>
+        <td><div class="row-actions">${actions}</div></td>
+      </tr>`;
+    }).join('');
+  }
+
+  document.getElementById('aria2-tbody').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-action]');
+    if (!btn) return;
+    aria2Action(btn.dataset.action, btn.dataset.gid);
+  });
+
+  async function loadAria2Transfers() {
+    try {
+      const { transfers } = await apiFetch('/api/aria2/transfers');
+      renderAria2Transfers(transfers);
+      document.getElementById('aria2-refresh-hint').textContent =
+        `Last updated: ${new Date().toLocaleTimeString()} · Auto-refreshes every 5 seconds`;
+    } catch (err) {
+      document.getElementById('aria2-tbody').innerHTML =
+        `<tr><td colspan="6" class="empty">Error: ${esc(err.message)}</td></tr>`;
+    }
+  }
+
   // ── Retry queue ──────────────────────────────────────────────────────────--
   let countdownInterval = null;
   let nextRetryTs = null;
@@ -985,17 +1311,24 @@
   document.getElementById('browse-cancel-btn').addEventListener('click', browseDismiss);
   document.getElementById('browse-close').addEventListener('click', browseDismiss);
 
+  // ── Archive.org modal button wiring ─────────────────────────────────────────
+  document.getElementById('archive-confirm-btn').addEventListener('click', archiveConfirm);
+  document.getElementById('archive-cancel-btn').addEventListener('click', archiveDismiss);
+  document.getElementById('archive-close').addEventListener('click', archiveDismiss);
+
   // ── Init ────────────────────────────────────────────────────────────────────
   checkStatus();
   loadTransfers();
   loadQueue();
   loadLog();
+  loadAria2Transfers();
 
   setInterval(loadTransfers, 5000);
   setInterval(loadQueue, 5000);
   setInterval(loadLog, 10000);
   setInterval(updateCountdown, 1000);
   setInterval(checkStatus, 30000);
+  setInterval(loadAria2Transfers, 5000);
 
   // Scroll history to bottom on first load
   setTimeout(() => {

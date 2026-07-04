@@ -136,6 +136,98 @@ function dockerExec(megaCommand, args = []) {
   });
 }
 
+// ── aria2 JSON-RPC ────────────────────────────────────────────────────────────
+const ARIA2_RPC_URL    = process.env.ARIA2_RPC_URL    || 'http://aria2:6800/jsonrpc';
+const ARIA2_RPC_SECRET = process.env.ARIA2_RPC_SECRET || '';
+const ARIA2_LIMIT      = 200;
+
+let aria2RpcId = 0;
+
+async function aria2Call(method, params = []) {
+  const body = {
+    jsonrpc: '2.0',
+    id: String(++aria2RpcId),
+    method: `aria2.${method}`,
+    params: [`token:${ARIA2_RPC_SECRET}`, ...params],
+  };
+  const res = await fetch(ARIA2_RPC_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`aria2 RPC HTTP ${res.status}`);
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || 'aria2 RPC error');
+  return data.result;
+}
+
+async function aria2AddUri(url, displayName) {
+  return aria2Call('addUri', [[url], { dir: '/downloads/', out: displayName }]);
+}
+
+function basename(p) {
+  if (!p) return '';
+  return p.split('/').filter(Boolean).pop() || '';
+}
+
+function normalizeAria2Status(s) {
+  switch (s) {
+    case 'active':   return 'downloading';
+    case 'waiting':  return 'queued';
+    case 'paused':   return 'paused';
+    case 'error':    return 'error';
+    case 'complete': return 'complete';
+    default:         return 'unknown';
+  }
+}
+
+function normalizeAria2Item(r) {
+  const total = Number(r.totalLength || 0);
+  const done  = Number(r.completedLength || 0);
+  return {
+    gid:          r.gid,
+    filename:     basename(r.files?.[0]?.path) || 'Unknown',
+    status:       normalizeAria2Status(r.status),
+    progress:     total > 0 ? (done / total) * 100 : 0,
+    speed:        Number(r.downloadSpeed || 0),
+    transferred:  done,
+    total,
+    errorMessage: r.errorMessage || '',
+  };
+}
+
+async function aria2TellAll() {
+  const [active, waiting, stopped] = await Promise.all([
+    aria2Call('tellActive', []),
+    aria2Call('tellWaiting', [0, ARIA2_LIMIT]),
+    aria2Call('tellStopped', [0, ARIA2_LIMIT]),
+  ]);
+  return [...active, ...waiting, ...stopped].map(normalizeAria2Item);
+}
+
+async function aria2RemoveAny(gid) {
+  try { await aria2Call('forceRemove', [gid]); }
+  catch { await aria2Call('removeDownloadResult', [gid]).catch(() => {}); }
+}
+
+// ── archive.org ───────────────────────────────────────────────────────────────
+function extractArchiveIdentifier(input) {
+  const trimmed = (input || '').trim();
+  const match = trimmed.match(/archive\.org\/(?:download|details|metadata)\/([^/?#]+)/i);
+  if (match) return match[1];
+  if (/^[A-Za-z0-9._-]+$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+async function fetchArchiveMetadata(identifier) {
+  const res = await fetch(`https://archive.org/metadata/${encodeURIComponent(identifier)}`);
+  if (!res.ok) throw new Error(`archive.org metadata HTTP ${res.status}`);
+  const data = await res.json();
+  if (!data || !Array.isArray(data.files) || !data.files.length)
+    throw new Error('No files found for this archive.org item');
+  return data;
+}
+
 // ── Transfer parsing ──────────────────────────────────────────────────────────
 const COL_MAP = [
   [['tag'],                      'tag'],
@@ -560,6 +652,90 @@ app.post('/api/browse/confirm', async (req, res) => {
   if (keep.length) try { await dockerExec('mega-transfers', ['-r', '-a']); } catch {}
   if (keep.length) logActivity('DOWNLOADED', `${keep.length} file(s) selected from folder`, `${cancel.length} skipped`);
   res.json({ success: true });
+});
+
+// ── Archive.org routes ────────────────────────────────────────────────────────
+app.post('/api/archive/browse', async (req, res) => {
+  const { url } = req.body;
+  const identifier = extractArchiveIdentifier(url);
+  if (!identifier) return res.status(400).json({ error: 'Could not extract an archive.org identifier from that URL' });
+
+  try {
+    const data = await fetchArchiveMetadata(identifier);
+    const NOISE = /(_meta\.xml|_files\.xml|_reviews\.xml|_archive\.torrent)$|^__ia_thumb/i;
+    const files = data.files
+      .filter(f => f.name && !NOISE.test(f.name))
+      .map(f => ({ name: f.name, size: f.size || '0' }));
+    res.json({ identifier, files });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/api/archive/confirm', async (req, res) => {
+  const { identifier, files } = req.body;
+  if (!identifier || !Array.isArray(files) || !files.length)
+    return res.status(400).json({ error: 'No files selected' });
+
+  const results = [];
+  for (const name of files) {
+    const url = `https://archive.org/download/${encodeURIComponent(identifier)}/${
+      name.split('/').map(encodeURIComponent).join('/')}`;
+    try {
+      const gid = await aria2AddUri(url, name);
+      logActivity('ARIA2_QUEUED', name, identifier);
+      results.push({ name, success: true, gid });
+    } catch (err) {
+      logActivity('ARIA2_FAILED', name, err.message);
+      results.push({ name, success: false, error: err.message });
+    }
+  }
+  res.json({ results });
+});
+
+// ── aria2 routes ──────────────────────────────────────────────────────────────
+app.get('/api/aria2/transfers', async (req, res) => {
+  try {
+    const transfers = await aria2TellAll();
+    res.json({ transfers });
+  } catch (err) {
+    res.status(500).json({ error: err.message, transfers: [] });
+  }
+});
+
+app.post('/api/aria2/pause', async (req, res) => {
+  const { gid } = req.body;
+  try {
+    await (gid === 'all' ? aria2Call('pauseAll') : aria2Call('pause', [gid]));
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/aria2/resume', async (req, res) => {
+  const { gid } = req.body;
+  try {
+    await (gid === 'all' ? aria2Call('unpauseAll') : aria2Call('unpause', [gid]));
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/aria2/cancel', async (req, res) => {
+  const { gid } = req.body;
+  try {
+    if (gid === 'all') {
+      const all = await aria2TellAll();
+      for (const t of all) await aria2RemoveAny(t.gid);
+    } else {
+      await aria2RemoveAny(gid);
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ── Log routes ────────────────────────────────────────────────────────────────
