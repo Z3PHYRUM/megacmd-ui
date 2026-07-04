@@ -24,10 +24,13 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 - **Folder file picker** — for `mega.nz/folder/` links, browse contents and select individual files before downloading
 - **Bandwidth quota handling** — quota-exceeded downloads are automatically added to a retry queue and retried every 15 minutes
 - **Transfer manager** — live table of active/queued/paused MEGA transfers with progress, speed, and size; auto-refreshes every 5 seconds
-- **Archive.org downloads** — paste an `archive.org` item URL, pick which files you want from a file picker, and queue them as downloads via aria2c
-- **aria2 downloads table** — second transfer table for archive.org (or any aria2-queued) downloads, with the same per-row and bulk pause/resume/cancel controls, auto-refreshing every 5 seconds
-- **Per-transfer controls** — pause, resume, or cancel individual transfers (both MEGA and aria2)
-- **Bulk controls** — pause all, resume all, cancel all (both tables)
+- **Archive.org downloads** — paste an `archive.org` item URL (either in the dedicated box or directly into the main download queue), pick which files you want from a file picker, and queue them as downloads via aria2c
+- **Direct downloads** — paste arbitrary HTTP(S) URLs or magnet links and queue them via aria2c
+- **Torrent file picker** — magnet links open a file picker once aria2 resolves the torrent's metadata, so you can select just the files you want before any data downloads
+- **YouTube downloads** — paste a `youtube.com`/`youtu.be` URL to download the video as the highest-quality mp4 available, via `yt-dlp` (single video only for now, no playlist support yet)
+- **aria2 downloads table** — second transfer table for archive.org, direct, and torrent downloads, with the same per-row and bulk pause/resume/cancel controls, auto-refreshing every 5 seconds
+- **Per-transfer controls** — pause, resume, or cancel individual transfers (MEGA and aria2); cancel or dismiss individual YouTube jobs
+- **Bulk controls** — pause all, resume all, cancel all (MEGA and aria2 tables)
 - **Activity log** — history of downloads, failures, and queue events (last 200 entries)
 - **Status bar** — shows MEGAcmd login status at a glance
 - **Dark theme** — mobile-friendly, no frameworks, no build step
@@ -36,7 +39,8 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 
 - Docker with an existing `megacmd` container running
 - The `megacmd` container name must be reachable via `docker exec` from within the `megacmd-ui` container
-- An `aria2` container with RPC enabled, reachable from `megacmd-ui` (required for archive.org downloads — see [docker-compose.yml](docker-compose.yml) for a ready-to-use `aria2` service definition using `p3terx/aria2-pro`)
+- An `aria2` container with RPC enabled, reachable from `megacmd-ui` (required for archive.org, direct, and torrent downloads — see [docker-compose.yml](docker-compose.yml) for a ready-to-use `aria2` service definition using `p3terx/aria2-pro`)
+- `megacmd-ui` and `aria2` should share the same host downloads directory (e.g. both mounting `/mnt/media1/downloads:/downloads`) so YouTube downloads (written directly by `yt-dlp` inside the `megacmd-ui` container) land in the same place as MEGA/aria2 downloads. `yt-dlp` and `ffmpeg` are already baked into the `megacmd-ui` image — no extra container needed.
 
 ## Deployment
 
@@ -57,6 +61,7 @@ git clone https://github.com/Z3PHYRUM/megacmd-ui.git /opt/docker/megacmd-ui
       - "8085:8085"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /mnt/media1/downloads:/downloads
     environment:
       - MEGACMD_CONTAINER=megacmd
       - DOWNLOAD_DEST=/downloads/
@@ -113,8 +118,10 @@ cd /opt/docker/stack && docker compose up -d --build megacmd-ui
 | `PORT` | `8085` | Port the UI listens on |
 | `RETRY_INTERVAL_MIN` | `15` | Minutes between retry queue attempts for quota-exceeded downloads |
 | `DATA_DIR` | `/data` | Path inside the container for `queue.json` and `activity.log` |
-| `ARIA2_RPC_URL` | `http://aria2:6800/jsonrpc` | URL of the aria2 JSON-RPC endpoint, used for archive.org downloads |
+| `ARIA2_RPC_URL` | `http://aria2:6800/jsonrpc` | URL of the aria2 JSON-RPC endpoint, used for archive.org, direct, and torrent downloads |
 | `ARIA2_RPC_SECRET` | *(empty)* | Shared secret for aria2 RPC auth — must match the `aria2` container's `RPC_SECRET` |
+| `YTDLP_BIN` | `yt-dlp` | Path/name of the `yt-dlp` binary to invoke for YouTube downloads |
+| `YTDLP_OUTPUT_DIR` | `/downloads/` | Directory `yt-dlp` writes finished videos to inside the container |
 
 ## Troubleshooting
 
@@ -162,6 +169,21 @@ The aria2 table will show an error and archive.org downloads will fail to queue 
 
 If downloads queue but several run at once instead of one at a time, `max-concurrent-downloads=1` likely isn't set in `aria2.conf` yet — see the note in [Deployment](#2-add-to-your-docker-compose-file).
 
+### Torrent picker times out or never shows files
+
+The torrent file picker has to wait for aria2 to resolve the magnet link's metadata (the file list) before it can show anything, which needs at least one reachable peer or working tracker/DHT. It gives up after 30 seconds. If this happens consistently, check `docker logs aria2` for DHT/tracker connectivity issues — a dead magnet (no seeds) will always time out.
+
+### YouTube downloads fail immediately
+
+Confirm `yt-dlp` and `ffmpeg` are present in the running container:
+
+```bash
+docker exec megacmd-ui yt-dlp --version
+docker exec megacmd-ui ffmpeg -version
+```
+
+If either is missing, rebuild the image (`docker compose up -d --build megacmd-ui`) — they're installed in the `Dockerfile` and won't appear after a plain restart. YouTube frequently changes its site in ways that break older `yt-dlp` releases; if downloads that used to work start failing, rebuilding to pick up a newer `yt-dlp` from PyPI is usually the fix.
+
 ## Local Development
 
 Run without Docker using mock data:
@@ -173,7 +195,7 @@ MOCK=1 node server.js
 
 Open `http://localhost:8085`. In mock mode the server returns fake MEGA transfers covering all states (downloading, paused, queued, error, uploading) and actions like pause/resume/cancel update the in-memory state — so the MEGA side of the UI is fully interactive without a real MEGAcmd instance.
 
-The archive.org and aria2 features are **not mocked**: `/api/archive/browse` always calls the real (public, read-only) archive.org API even under `MOCK=1`, and the aria2 table/endpoints require a real, reachable aria2 container — there's no local-dev fallback for aria2 yet.
+The archive.org, aria2, torrent, and YouTube features are **not mocked**: `/api/archive/browse` always calls the real (public, read-only) archive.org API even under `MOCK=1`, the aria2/torrent endpoints require a real, reachable aria2 container, and YouTube downloads spawn a real `yt-dlp` process — you'll need `yt-dlp` and `ffmpeg` on your `PATH` to test that locally outside Docker. There's no local-dev fallback for any of these yet.
 
 ## Compatibility
 
@@ -183,7 +205,8 @@ Tested with MEGAcmd **2.5.2.1**. The transfer parser uses `--col-separator=|` an
 
 - **Backend:** Node.js + Express
 - **Frontend:** Single HTML file — vanilla JS, no framework, no build step
-- **Dependencies:** `express`, `cors` only
+- **npm dependencies:** `express`, `cors`, `dockerode`
+- **External tools (baked into the image):** `yt-dlp`, `ffmpeg` (YouTube downloads); talks to a separate `aria2` container via JSON-RPC (archive.org/direct/torrent downloads)
 
 ## License
 
