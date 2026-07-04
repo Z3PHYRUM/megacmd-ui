@@ -274,24 +274,33 @@ function serializeYtJob(job) {
 }
 
 function spawnYoutubeDownload(url) {
+  const isPlaylist = /[?&]list=/i.test(url);
   const job = {
     id: String(++ytJobId),
     url,
-    filename: 'Fetching info…',
+    filename: isPlaylist ? 'Fetching playlist info…' : 'Fetching info…',
     status: 'starting',
     progress: 0,
     error: '',
     proc: null,
     stderrTail: '',
+    isPlaylist,
+    playlistTitle: '',
+    itemIndex: 0,
+    itemCount: 0,
   };
   ytJobs.push(job);
+
+  const outputTemplate = isPlaylist
+    ? path.join(YTDLP_OUTPUT_DIR, '%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s')
+    : path.join(YTDLP_OUTPUT_DIR, '%(title)s.%(ext)s');
 
   const proc = spawn(YTDLP_BIN, [
     '-f', YTDLP_FORMAT,
     '--merge-output-format', 'mp4',
     '--newline',
-    '--no-playlist',
-    '-o', path.join(YTDLP_OUTPUT_DIR, '%(title)s.%(ext)s'),
+    ...(isPlaylist ? [] : ['--no-playlist']),
+    '-o', outputTemplate,
     url,
   ]);
   job.proc = proc;
@@ -303,10 +312,29 @@ function spawnYoutubeDownload(url) {
     const lines = stdoutBuf.split('\n');
     stdoutBuf = lines.pop();
     for (const line of lines) {
+      const playlistTitle = line.match(/^\[download\] Downloading playlist:\s+(.+)$/);
+      if (playlistTitle) job.playlistTitle = playlistTitle[1];
+
+      const item = line.match(/^\[download\] Downloading item (\d+) of (\d+)/);
+      if (item) { job.itemIndex = Number(item[1]); job.itemCount = Number(item[2]); }
+
       const dest = line.match(/^\[download\] Destination:\s+(.+)$/) || line.match(/^\[Merger\] Merging formats into "(.+)"$/);
-      if (dest) job.filename = basename(dest[1]);
+      if (dest) job.currentFile = basename(dest[1]);
+
       const pct = line.match(/^\[download\]\s+([\d.]+)%/);
-      if (pct) job.progress = parseFloat(pct[1]);
+      if (pct) {
+        const itemPct = parseFloat(pct[1]);
+        job.progress = (job.isPlaylist && job.itemCount > 0)
+          ? ((job.itemIndex - 1) / job.itemCount * 100) + (itemPct / job.itemCount)
+          : itemPct;
+      }
+    }
+    if (job.isPlaylist) {
+      job.filename = job.playlistTitle
+        ? `${job.playlistTitle}${job.itemCount ? ` (${job.itemIndex}/${job.itemCount})` : ''}`
+        : 'Fetching playlist info…';
+    } else if (job.currentFile) {
+      job.filename = job.currentFile;
     }
   });
   proc.stderr.on('data', chunk => {

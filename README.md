@@ -27,7 +27,7 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 - **Archive.org downloads** — paste an `archive.org` item URL (either in the dedicated box or directly into the main download queue), pick which files you want from a file picker, and queue them as downloads via aria2c
 - **Direct downloads** — paste arbitrary HTTP(S) URLs or magnet links and queue them via aria2c
 - **Torrent file picker** — magnet links open a file picker once aria2 resolves the torrent's metadata, so you can select just the files you want before any data downloads
-- **YouTube downloads** — paste a `youtube.com`/`youtu.be` URL to download the video as the highest-quality mp4 available, via `yt-dlp` (single video only for now, no playlist support yet)
+- **YouTube downloads** — paste a `youtube.com`/`youtu.be` URL to download the video (or, if the URL has a `list=` parameter, the whole playlist) as the highest-quality mp4 available, via `yt-dlp`. Playlist videos are saved into a folder named after the playlist title, numbered in playlist order
 - **aria2 downloads table** — second transfer table for archive.org, direct, and torrent downloads, with the same per-row and bulk pause/resume/cancel controls, auto-refreshing every 5 seconds
 - **Per-transfer controls** — pause, resume, or cancel individual transfers (MEGA and aria2); cancel or dismiss individual YouTube jobs
 - **Bulk controls** — pause all, resume all, cancel all (MEGA and aria2 tables)
