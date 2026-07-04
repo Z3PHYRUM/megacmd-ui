@@ -513,6 +513,45 @@
   </div>
 </div>
 
+<!-- Torrent file picker modal -->
+<div id="torrent-overlay" class="browse-overlay hidden">
+  <div class="browse-modal">
+    <div class="browse-header">
+      <span>Select Files to Download</span>
+      <button class="icon" id="torrent-close" title="Cancel">✕</button>
+    </div>
+    <div class="browse-body">
+      <div id="torrent-loading" class="browse-loading" style="display:none">
+        <span class="spinner"></span>Fetching torrent metadata…
+      </div>
+      <div id="torrent-content" style="display:none; flex-direction:column; gap:10px; flex:1; min-height:0;">
+        <div class="toolbar" style="margin:0">
+          <button class="secondary sm" onclick="torrentSelectAll(true)">Select All</button>
+          <button class="secondary sm" onclick="torrentSelectAll(false)">Select None</button>
+          <span class="countdown" id="torrent-count"></span>
+        </div>
+        <div class="browse-file-wrap table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:34px;padding:8px 6px 8px 11px"></th>
+                <th>File</th>
+                <th>Size</th>
+              </tr>
+            </thead>
+            <tbody id="torrent-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="torrent-error" class="dl-errors hidden"></div>
+    </div>
+    <div class="browse-footer">
+      <button class="secondary" id="torrent-cancel-btn">Cancel</button>
+      <button id="torrent-confirm-btn" disabled>Download Selected</button>
+    </div>
+  </div>
+</div>
+
 <main>
   <!-- Download Queue -->
   <section class="panel">
@@ -836,9 +875,19 @@
 
   // ── Direct downloads (aria2) ────────────────────────────────────────────────
   async function queueAria2Downloads() {
-    const links = document.getElementById('aria2-links').value
+    const lines = document.getElementById('aria2-links').value
       .split('\n').map(l => l.trim()).filter(Boolean);
-    if (!links.length) { toast('No links entered', 'error'); return; }
+    if (!lines.length) { toast('No links entered', 'error'); return; }
+
+    const magnets = lines.filter(l => /^magnet:/i.test(l));
+    const links   = lines.filter(l => !/^magnet:/i.test(l));
+
+    if (magnets.length > 0) {
+      openTorrentPicker(magnets[0]);
+      if (magnets.length > 1)
+        toast(`${magnets.length - 1} more magnet link(s) — add them after this one`, 'warn', 6000);
+    }
+    if (!links.length) return;
 
     const btn = document.getElementById('aria2-dl-btn');
     btn.disabled = true;
@@ -1027,6 +1076,88 @@
 
   function archiveDismiss() {
     document.getElementById('archive-overlay').classList.add('hidden');
+  }
+
+  // ── Torrent file picker ──────────────────────────────────────────────────────
+  let torrentGid = null;
+
+  function openTorrentPicker(link) {
+    const overlay = document.getElementById('torrent-overlay');
+    overlay.classList.remove('hidden');
+    document.getElementById('torrent-loading').style.display = 'block';
+    document.getElementById('torrent-content').style.display = 'none';
+    document.getElementById('torrent-error').classList.add('hidden');
+    document.getElementById('torrent-confirm-btn').disabled = true;
+    torrentGid = null;
+
+    apiFetch('/api/torrent/browse', { method: 'POST', body: JSON.stringify({ link }) })
+      .then(({ gid, files }) => {
+        torrentGid = gid;
+        document.getElementById('torrent-loading').style.display = 'none';
+        renderTorrentFiles(files);
+        document.getElementById('torrent-content').style.display = 'flex';
+        document.getElementById('torrent-confirm-btn').disabled = false;
+        updateTorrentCount();
+      })
+      .catch(err => {
+        document.getElementById('torrent-loading').style.display = 'none';
+        const el = document.getElementById('torrent-error');
+        el.innerHTML = `<div class="dl-errors-header"><span>${esc(err.message)}</span></div>`;
+        el.classList.remove('hidden');
+      });
+  }
+
+  function renderTorrentFiles(files) {
+    document.getElementById('torrent-tbody').innerHTML = files.map(f => `<tr>
+        <td style="padding:7px 6px 7px 11px">
+          <input type="checkbox" class="torrent-cb" data-index="${f.index}" checked>
+        </td>
+        <td class="filename-cell" title="${esc(f.name)}">${esc(f.name)}</td>
+        <td style="color:var(--muted);white-space:nowrap;font-size:12px">${esc(fmtBytes(Number(f.size) || 0))}</td>
+      </tr>`).join('');
+    document.getElementById('torrent-tbody').querySelectorAll('.torrent-cb')
+      .forEach(cb => cb.addEventListener('change', updateTorrentCount));
+  }
+
+  function updateTorrentCount() {
+    const all     = document.querySelectorAll('.torrent-cb').length;
+    const checked = document.querySelectorAll('.torrent-cb:checked').length;
+    document.getElementById('torrent-count').textContent = `${checked} / ${all} selected`;
+  }
+
+  function torrentSelectAll(select) {
+    document.querySelectorAll('.torrent-cb').forEach(cb => { cb.checked = select; });
+    updateTorrentCount();
+  }
+
+  async function torrentConfirm() {
+    const files = [...document.querySelectorAll('.torrent-cb:checked')].map(cb => Number(cb.dataset.index));
+    if (!files.length) { toast('No files selected', 'error'); return; }
+    const btn = document.getElementById('torrent-confirm-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Queuing…';
+    try {
+      await apiFetch('/api/torrent/confirm', {
+        method: 'POST', body: JSON.stringify({ gid: torrentGid, files }),
+      });
+      toast('Torrent queued', 'success');
+      document.getElementById('torrent-overlay').classList.add('hidden');
+      torrentGid = null;
+      loadAria2Transfers();
+    } catch (err) {
+      toast(`Error: ${err.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Download Selected';
+    }
+  }
+
+  function torrentDismiss() {
+    document.getElementById('torrent-overlay').classList.add('hidden');
+    if (torrentGid) {
+      apiFetch('/api/torrent/cancel', { method: 'POST', body: JSON.stringify({ gid: torrentGid }) }).catch(() => {});
+      torrentGid = null;
+    }
   }
 
   // ── Download error panel ─────────────────────────────────────────────────--
@@ -1371,6 +1502,9 @@
   document.getElementById('archive-confirm-btn').addEventListener('click', archiveConfirm);
   document.getElementById('archive-cancel-btn').addEventListener('click', archiveDismiss);
   document.getElementById('archive-close').addEventListener('click', archiveDismiss);
+  document.getElementById('torrent-confirm-btn').addEventListener('click', torrentConfirm);
+  document.getElementById('torrent-cancel-btn').addEventListener('click', torrentDismiss);
+  document.getElementById('torrent-close').addEventListener('click', torrentDismiss);
 
   // ── Init ────────────────────────────────────────────────────────────────────
   checkStatus();

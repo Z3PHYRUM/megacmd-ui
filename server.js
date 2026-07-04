@@ -165,6 +165,36 @@ async function aria2AddUri(url, displayName) {
   return aria2Call('addUri', [[url], { dir: '/downloads/', out: displayName }]);
 }
 
+const TORRENT_METADATA_TIMEOUT_MS = 30000;
+const TORRENT_METADATA_POLL_MS    = 700;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Adds a magnet link and waits for aria2 to resolve its BitTorrent metadata
+// (file list), pausing the download once resolved so the caller can present
+// a file picker before any data transfer begins.
+async function aria2AddMagnetForBrowse(magnetLink) {
+  const gid = await aria2Call('addUri', [[magnetLink], { dir: '/downloads/' }]);
+  const deadline = Date.now() + TORRENT_METADATA_TIMEOUT_MS;
+  try {
+    while (Date.now() < deadline) {
+      const status = await aria2Call('tellStatus', [gid, ['bittorrent', 'files', 'totalLength']]);
+      if (status.bittorrent?.info?.name && Number(status.totalLength) > 0) {
+        await aria2Call('pause', [gid]).catch(() => {});
+        const files = status.files
+          .map((f, i) => ({ index: i + 1, name: basename(f.path) || f.path, size: Number(f.length) || 0 }))
+          .filter(f => f.name && !/^_+padding_file/i.test(f.name));
+        return { gid, name: status.bittorrent.info.name, files };
+      }
+      await sleep(TORRENT_METADATA_POLL_MS);
+    }
+  } catch (err) {
+    await aria2RemoveAny(gid).catch(() => {});
+    throw err;
+  }
+  await aria2RemoveAny(gid).catch(() => {});
+  throw new Error('Timed out waiting for torrent metadata (no peers found)');
+}
+
 function basename(p) {
   if (!p) return '';
   return p.split('/').filter(Boolean).pop() || '';
@@ -712,6 +742,43 @@ app.post('/api/aria2/add', async (req, res) => {
     }
   }
   res.json({ results });
+});
+
+// ── Torrent routes ────────────────────────────────────────────────────────────
+app.post('/api/torrent/browse', async (req, res) => {
+  const { link } = req.body;
+  if (typeof link !== 'string' || !/^magnet:/i.test(link.trim()))
+    return res.status(400).json({ error: 'Not a magnet link' });
+
+  try {
+    const { gid, name, files } = await aria2AddMagnetForBrowse(link.trim());
+    res.json({ gid, name, files });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+app.post('/api/torrent/confirm', async (req, res) => {
+  const { gid, files } = req.body;
+  if (!gid || !Array.isArray(files) || !files.length)
+    return res.status(400).json({ error: 'No files selected' });
+
+  try {
+    await aria2Call('changeOption', [gid, { 'select-file': files.join(',') }]);
+    await aria2Call('unpause', [gid]);
+    logActivity('ARIA2_QUEUED', gid, 'torrent');
+    res.json({ success: true });
+  } catch (err) {
+    logActivity('ARIA2_FAILED', gid, err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/torrent/cancel', async (req, res) => {
+  const { gid } = req.body;
+  if (!gid) return res.status(400).json({ error: 'No gid provided' });
+  await aria2RemoveAny(gid).catch(() => {});
+  res.json({ success: true });
 });
 
 // ── aria2 routes ──────────────────────────────────────────────────────────────
