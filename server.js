@@ -693,6 +693,27 @@ app.post('/api/archive/confirm', async (req, res) => {
   res.json({ results });
 });
 
+app.post('/api/aria2/add', async (req, res) => {
+  const { links } = req.body;
+  if (!Array.isArray(links) || links.length === 0)
+    return res.status(400).json({ error: 'No links provided' });
+
+  const results = [];
+  for (const rawLink of links) {
+    const link = typeof rawLink === 'string' ? rawLink.trim() : '';
+    if (!link) continue;
+    try {
+      const gid = await aria2AddUri(link);
+      logActivity('ARIA2_QUEUED', link, 'direct');
+      results.push({ link, success: true, gid });
+    } catch (err) {
+      logActivity('ARIA2_FAILED', link, err.message);
+      results.push({ link, success: false, error: err.message });
+    }
+  }
+  res.json({ results });
+});
+
 // ── aria2 routes ──────────────────────────────────────────────────────────────
 app.get('/api/aria2/transfers', async (req, res) => {
   try {

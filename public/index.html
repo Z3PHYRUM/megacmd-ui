@@ -552,6 +552,18 @@
     </div>
   </section>
 
+  <!-- Direct Downloads (aria2) -->
+  <section class="panel">
+    <h2>Direct Downloads</h2>
+    <textarea
+      id="aria2-links"
+      placeholder="Paste direct download URLs or magnet links here, one per line"
+    ></textarea>
+    <div class="dl-row">
+      <button id="aria2-dl-btn" onclick="queueAria2Downloads()">Download</button>
+    </div>
+  </section>
+
   <!-- Retry Queue (hidden when empty) -->
   <section class="panel hidden" id="rq-panel">
     <div class="panel-header">
@@ -703,13 +715,22 @@
     return printable / s.length > 0.95;
   }
 
-  function decodeMaybeBase64Line(line) {
-    if (!/^[A-Za-z0-9+/=]+$/.test(line) || line.length <= 20 || /^https:\/\//i.test(line)) return null;
-    let decoded;
-    try { decoded = atob(line); } catch { return { kind: 'garbage', value: line }; }
-    if (!isPrintableText(decoded)) return { kind: 'garbage', value: line };
-    if (/^https:\/\/mega\.nz\//i.test(decoded)) return { kind: 'mega', value: decoded };
-    if (/^https?:\/\//i.test(decoded)) return { kind: 'url', value: decoded };
+  // Classifies a pasted line, short-circuiting on known URL prefixes before
+  // ever attempting base64 decoding (archive.org/mega.nz URLs can otherwise
+  // look like valid base64 and get corrupted by a decode attempt).
+  function classifyLine(line) {
+    if (/^https:\/\/archive\.org\/download\//i.test(line)) return { kind: 'archive', value: line };
+    if (/^https:\/\/mega\.nz\//i.test(line)) return { kind: 'mega', value: line };
+
+    if (/^[A-Za-z0-9+/=]+$/.test(line) && line.length > 20 && !/^https:\/\//i.test(line)) {
+      let decoded;
+      try { decoded = atob(line); } catch { return { kind: 'garbage', value: line }; }
+      if (!isPrintableText(decoded)) return { kind: 'garbage', value: line };
+      const result = classifyLine(decoded);
+      if (result.kind === 'garbage' && /^https?:\/\//i.test(decoded)) return { kind: 'url', value: decoded };
+      return result;
+    }
+
     return { kind: 'garbage', value: line };
   }
 
@@ -749,21 +770,28 @@
     if (!rawLines.length) { toast('No links entered', 'error'); return; }
 
     const all = [];
+    const archiveLinks = [];
     let attentionAdded = false;
     for (const line of rawLines) {
-      const decoded = decodeMaybeBase64Line(line);
-      if (!decoded) { all.push(line); continue; }
-      if (decoded.kind === 'mega') { all.push(decoded.value); continue; }
+      const classified = classifyLine(line);
+      if (classified.kind === 'archive') { archiveLinks.push(classified.value); continue; }
+      if (classified.kind === 'mega') { all.push(classified.value); continue; }
       needsAttention.push({
-        kind: decoded.kind,
-        value: decoded.value,
-        note: decoded.kind === 'url'
+        kind: classified.kind,
+        value: classified.value,
+        note: classified.kind === 'url'
           ? 'Follow this link to get the MEGA URL'
           : 'Could not decode this line into a usable link',
       });
       attentionAdded = true;
     }
     if (attentionAdded) renderAttention();
+
+    if (archiveLinks.length > 0) {
+      openArchivePicker(archiveLinks[0]);
+      if (archiveLinks.length > 1)
+        toast(`${archiveLinks.length - 1} more archive.org link(s) — add them after this one`, 'warn', 6000);
+    }
     if (!all.length) return;
 
     const dest    = document.getElementById('dest').value;
@@ -798,6 +826,34 @@
       }
       if (bad.length) showDlErrors(bad);
       if (ok.length || quota.length) document.getElementById('links').value = '';
+    } catch (err) {
+      toast(`Request failed: ${err.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Download';
+    }
+  }
+
+  // ── Direct downloads (aria2) ────────────────────────────────────────────────
+  async function queueAria2Downloads() {
+    const links = document.getElementById('aria2-links').value
+      .split('\n').map(l => l.trim()).filter(Boolean);
+    if (!links.length) { toast('No links entered', 'error'); return; }
+
+    const btn = document.getElementById('aria2-dl-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Queuing…';
+    try {
+      const { results } = await apiFetch('/api/aria2/add', {
+        method: 'POST',
+        body: JSON.stringify({ links }),
+      });
+      const ok  = results.filter(r => r.success);
+      const bad = results.filter(r => !r.success);
+      if (ok.length) toast(`Queued ${ok.length} download${ok.length > 1 ? 's' : ''}`, 'success');
+      if (bad.length) toast(`${bad.length} link${bad.length > 1 ? 's' : ''} failed: ${bad[0].error}`, 'error', 6000);
+      if (ok.length) document.getElementById('aria2-links').value = '';
+      loadAria2Transfers();
     } catch (err) {
       toast(`Request failed: ${err.message}`, 'error');
     } finally {
