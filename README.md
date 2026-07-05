@@ -23,17 +23,16 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 - **Base64 link decoding** — pasted links that turn out to be base64-encoded are transparently decoded; a decoded MEGA link is queued automatically, anything else is surfaced in a "Needs Attention" panel instead of silently failing
 - **Folder file picker** — for `mega.nz/folder/` links, browse contents and select individual files before downloading
 - **Bandwidth quota handling** — quota-exceeded downloads are automatically added to a retry queue and retried every 15 minutes
-- **aria2 Downloads section** — archive.org, direct HTTP(S)/magnet, and torrent downloads all live in one panel since they share the same aria2 queue: an `archive.org` URL box (opens a file picker) and a paste box for direct URLs or magnet links (either box can be used independently), one shared transfer table below both
+- **HTTP and Torrent Downloads section** — archive.org, direct HTTP(S), and magnet/torrent downloads all live in one panel since they share the same aria2 queue: an `archive.org` URL box (opens a file picker) and a paste box for direct URLs or magnet links (either box can be used independently), one shared transfer table below both
 - **Archive.org downloads** — paste an `archive.org` item URL (either in that section or directly into the MEGA download queue), pick which files you want from a file picker, and queue them as downloads via aria2c
-- **Torrent file picker** — magnet links pasted into the aria2 Downloads paste box open a file picker once aria2 resolves the torrent's metadata, so you can select just the files you want before any data downloads (only magnet links are supported — no `.torrent` file upload yet)
+- **Torrent file picker** — magnet links pasted into the HTTP and Torrent Downloads paste box open a file picker once aria2 resolves the torrent's metadata, so you can select just the files you want before any data downloads (only magnet links are supported — no `.torrent` file upload)
 - **YouTube downloads** — paste a `youtube.com`/`youtu.be` URL to download the video as the highest-quality mp4 available, via `yt-dlp`
 - **YouTube playlist picker** — paste a playlist URL (one with a `list=` parameter) to open a picker listing every video in the playlist, so you can uncheck the ones you don't want before downloading. Kept videos are saved into a folder named after the playlist title, numbered in playlist order
 - **Playlist progress expand** — a downloading/finished playlist job can be expanded to see each video's individual status and progress (read-only — Cancel still stops the whole playlist job, since it's one `yt-dlp` process)
 - **Single shared destination** — one "Destination" field at the bottom of the page sets the save path for every downloader (MEGA, archive.org, direct, torrents, and YouTube), with a "Browse…" button to navigate server-side folders instead of typing a path
 - **Collapsible sections** — each downloader panel can be collapsed via the arrow in its header to reduce clutter
-- **Color-coded by download type** — MEGA, Archive.org, Direct, Torrent, and YouTube each get their own accent color in the section headings and the activity log (a bolder/saturated version of the same color marks a completed download; failures are always red)
-- **aria2 downloads table** — per-row and bulk pause/resume/cancel controls, auto-refreshing every 5 seconds
-- **Stats bars** — each transfer table (MEGA, aria2, YouTube) shows a live summary (count by status, total size where known)
+- **Color-coded activity log** — MEGA, Archive.org, Direct, Torrent, and YouTube events each get their own accent color in the log (MEGA and YouTube's section headings match too); a bolder/saturated version of the same color marks a completed download, failures are always red
+- **Stats bars** — each transfer table (MEGA, HTTP/Torrent, YouTube) shows a live summary (count by status, total size where known), with per-row and bulk pause/resume/cancel controls, auto-refreshing every 5 seconds
 - **Per-transfer controls** — pause, resume, or cancel individual transfers (MEGA and aria2); cancel or dismiss individual YouTube jobs
 - **Bulk controls** — pause all, resume all, cancel all (MEGA and aria2 tables)
 - **Activity log** — history of downloads, failures, and queue events (last 200 entries)
