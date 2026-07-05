@@ -5,7 +5,7 @@ const cors = require('cors');
 const Docker = require('dockerode');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
@@ -164,8 +164,8 @@ async function aria2Call(method, params = []) {
   return data.result;
 }
 
-async function aria2AddUri(url, displayName) {
-  return aria2Call('addUri', [[url], { dir: '/downloads/', out: displayName }]);
+async function aria2AddUri(url, displayName, dir) {
+  return aria2Call('addUri', [[url], { dir: dir || '/downloads/', out: displayName }]);
 }
 
 const TORRENT_METADATA_TIMEOUT_MS = 30000;
@@ -175,8 +175,8 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // Adds a magnet link and waits for aria2 to resolve its BitTorrent metadata
 // (file list), pausing the download once resolved so the caller can present
 // a file picker before any data transfer begins.
-async function aria2AddMagnetForBrowse(magnetLink) {
-  const gid = await aria2Call('addUri', [[magnetLink], { dir: '/downloads/' }]);
+async function aria2AddMagnetForBrowse(magnetLink, dir) {
+  const gid = await aria2Call('addUri', [[magnetLink], { dir: dir || '/downloads/' }]);
   const deadline = Date.now() + TORRENT_METADATA_TIMEOUT_MS;
   try {
     while (Date.now() < deadline) {
@@ -201,6 +201,10 @@ async function aria2AddMagnetForBrowse(magnetLink) {
 function basename(p) {
   if (!p) return '';
   return p.split('/').filter(Boolean).pop() || '';
+}
+
+function resolveDest(dest) {
+  return (typeof dest === 'string' && dest.trim()) ? dest.trim() : '/downloads/';
 }
 
 function normalizeAria2Status(s) {
@@ -273,7 +277,7 @@ function serializeYtJob(job) {
   return { id, url, filename, status, progress, error };
 }
 
-function spawnYoutubeDownload(url) {
+function spawnYoutubeDownload(url, dest, items) {
   const isPlaylist = /[?&]list=/i.test(url);
   const job = {
     id: String(++ytJobId),
@@ -291,15 +295,17 @@ function spawnYoutubeDownload(url) {
   };
   ytJobs.push(job);
 
+  const outputDir = resolveDest(dest);
   const outputTemplate = isPlaylist
-    ? path.join(YTDLP_OUTPUT_DIR, '%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s')
-    : path.join(YTDLP_OUTPUT_DIR, '%(title)s.%(ext)s');
+    ? path.join(outputDir, '%(playlist_title)s/%(playlist_index)s - %(title)s.%(ext)s')
+    : path.join(outputDir, '%(title)s.%(ext)s');
 
   const proc = spawn(YTDLP_BIN, [
     '-f', YTDLP_FORMAT,
     '--merge-output-format', 'mp4',
     '--newline',
     ...(isPlaylist ? [] : ['--no-playlist']),
+    ...(isPlaylist && Array.isArray(items) && items.length ? ['--playlist-items', items.join(',')] : []),
     '-o', outputTemplate,
     url,
   ]);
@@ -611,7 +617,7 @@ app.post('/api/download', async (req, res) => {
   if (!Array.isArray(links) || links.length === 0)
     return res.status(400).json({ error: 'No links provided' });
 
-  const destination = (typeof dest === 'string' && dest.trim()) ? dest.trim() : '/downloads/';
+  const destination = resolveDest(dest);
   const results = [];
 
   for (const rawLink of links) {
@@ -684,7 +690,7 @@ app.post('/api/queue/add', (req, res) => {
   const { links, dest } = req.body;
   if (!Array.isArray(links) || !links.length)
     return res.status(400).json({ error: 'No links provided' });
-  const destination = (typeof dest === 'string' && dest.trim()) ? dest.trim() : '/downloads/';
+  const destination = resolveDest(dest);
   const clean = links.map(l => (typeof l === 'string' ? l.trim() : '')).filter(Boolean);
   if (!clean.length) return res.status(400).json({ error: 'No valid links' });
   res.json({ items: addToQueue(clean, destination) });
@@ -734,7 +740,7 @@ app.post('/api/queue/clear', (req, res) => {
 app.post('/api/browse', async (req, res) => {
   const { link, dest } = req.body;
   if (!link) return res.status(400).json({ error: 'No link provided' });
-  const destination = (typeof dest === 'string' && dest.trim()) ? dest.trim() : '/downloads/';
+  const destination = resolveDest(dest);
 
   // Snapshot existing tags so we can identify what mega-get adds
   let existingTags = new Set();
@@ -807,16 +813,17 @@ app.post('/api/archive/browse', async (req, res) => {
 });
 
 app.post('/api/archive/confirm', async (req, res) => {
-  const { identifier, files } = req.body;
+  const { identifier, files, dest } = req.body;
   if (!identifier || !Array.isArray(files) || !files.length)
     return res.status(400).json({ error: 'No files selected' });
 
+  const destination = resolveDest(dest);
   const results = [];
   for (const name of files) {
     const url = `https://archive.org/download/${encodeURIComponent(identifier)}/${
       name.split('/').map(encodeURIComponent).join('/')}`;
     try {
-      const gid = await aria2AddUri(url, name);
+      const gid = await aria2AddUri(url, name, destination);
       logActivity('ARIA2_QUEUED', name, identifier);
       results.push({ name, success: true, gid });
     } catch (err) {
@@ -828,16 +835,17 @@ app.post('/api/archive/confirm', async (req, res) => {
 });
 
 app.post('/api/aria2/add', async (req, res) => {
-  const { links } = req.body;
+  const { links, dest } = req.body;
   if (!Array.isArray(links) || links.length === 0)
     return res.status(400).json({ error: 'No links provided' });
 
+  const destination = resolveDest(dest);
   const results = [];
   for (const rawLink of links) {
     const link = typeof rawLink === 'string' ? rawLink.trim() : '';
     if (!link) continue;
     try {
-      const gid = await aria2AddUri(link);
+      const gid = await aria2AddUri(link, undefined, destination);
       logActivity('ARIA2_QUEUED', link, 'direct');
       results.push({ link, success: true, gid });
     } catch (err) {
@@ -850,12 +858,12 @@ app.post('/api/aria2/add', async (req, res) => {
 
 // ── Torrent routes ────────────────────────────────────────────────────────────
 app.post('/api/torrent/browse', async (req, res) => {
-  const { link } = req.body;
+  const { link, dest } = req.body;
   if (typeof link !== 'string' || !/^magnet:/i.test(link.trim()))
     return res.status(400).json({ error: 'Not a magnet link' });
 
   try {
-    const { gid, name, files } = await aria2AddMagnetForBrowse(link.trim());
+    const { gid, name, files } = await aria2AddMagnetForBrowse(link.trim(), resolveDest(dest));
     res.json({ gid, name, files });
   } catch (err) {
     res.status(502).json({ error: err.message });
@@ -931,12 +939,32 @@ app.post('/api/aria2/cancel', async (req, res) => {
 });
 
 // ── YouTube routes ────────────────────────────────────────────────────────────
-app.post('/api/youtube/add', (req, res) => {
+app.post('/api/youtube/browse-playlist', (req, res) => {
   const { url } = req.body;
   if (typeof url !== 'string' || !YOUTUBE_URL_RE.test(url.trim()))
     return res.status(400).json({ error: 'Not a youtube.com or youtu.be URL' });
 
-  const job = spawnYoutubeDownload(url.trim());
+  execFile(YTDLP_BIN, ['--flat-playlist', '-J', url.trim()],
+    { maxBuffer: 20 * 1024 * 1024, timeout: 30000 },
+    (err, stdout, stderr) => {
+      if (err) {
+        const msg = (stderr || err.message).trim().split('\n').pop().replace(/^ERROR:\s*/, '');
+        return res.status(502).json({ error: msg || 'Failed to fetch playlist info' });
+      }
+      let data;
+      try { data = JSON.parse(stdout); } catch { return res.status(502).json({ error: 'Could not parse playlist metadata' }); }
+      const entries = (data.entries || []).map((e, i) => ({ index: i + 1, title: e.title || `Video ${i + 1}` }));
+      if (!entries.length) return res.status(502).json({ error: 'No videos found in this playlist' });
+      res.json({ title: data.title || 'Playlist', entries });
+    });
+});
+
+app.post('/api/youtube/add', (req, res) => {
+  const { url, dest, items } = req.body;
+  if (typeof url !== 'string' || !YOUTUBE_URL_RE.test(url.trim()))
+    return res.status(400).json({ error: 'Not a youtube.com or youtu.be URL' });
+
+  const job = spawnYoutubeDownload(url.trim(), dest, items);
   logActivity('YOUTUBE_QUEUED', url.trim());
   res.json({ job: serializeYtJob(job) });
 });

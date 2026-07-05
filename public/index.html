@@ -554,24 +554,95 @@
   </div>
 </div>
 
-<main>
-  <!-- Download Queue -->
-  <section class="panel">
-    <h2>Download Queue</h2>
-    <textarea
-      id="links"
-      placeholder="Paste Mega links here, one per line&#10;&#10;https://mega.nz/file/...&#10;https://mega.nz/folder/..."
-    ></textarea>
-    <div class="dl-row">
-      <input type="text" id="dest" value="/downloads/" placeholder="Destination path">
-      <button id="dl-btn" onclick="queueDownloads()">Download</button>
+<!-- YouTube playlist picker modal -->
+<div id="ytplaylist-overlay" class="browse-overlay hidden">
+  <div class="browse-modal">
+    <div class="browse-header">
+      <span>Select Videos to Download</span>
+      <button class="icon" id="ytplaylist-close" title="Cancel">✕</button>
     </div>
-    <div class="dl-errors hidden" id="dl-errors">
-      <div class="dl-errors-header">
-        <span id="dl-errors-title">Download errors</span>
-        <button onclick="clearDlErrors()" title="Dismiss">×</button>
+    <div class="browse-body">
+      <div id="ytplaylist-loading" class="browse-loading" style="display:none">
+        <span class="spinner"></span>Fetching playlist info…
       </div>
-      <div id="dl-errors-body"></div>
+      <div id="ytplaylist-content" style="display:none; flex-direction:column; gap:10px; flex:1; min-height:0;">
+        <div class="toolbar" style="margin:0">
+          <button class="secondary sm" onclick="ytPlaylistSelectAll(true)">Select All</button>
+          <button class="secondary sm" onclick="ytPlaylistSelectAll(false)">Select None</button>
+          <span class="countdown" id="ytplaylist-count"></span>
+        </div>
+        <div class="browse-file-wrap table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th style="width:34px;padding:8px 6px 8px 11px"></th>
+                <th style="width:48px">#</th>
+                <th>Title</th>
+              </tr>
+            </thead>
+            <tbody id="ytplaylist-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="ytplaylist-error" class="dl-errors hidden"></div>
+    </div>
+    <div class="browse-footer">
+      <button class="secondary" id="ytplaylist-cancel-btn">Cancel</button>
+      <button id="ytplaylist-confirm-btn" disabled>Download Selected</button>
+    </div>
+  </div>
+</div>
+
+<main>
+  <!-- Download Queue (MEGA) -->
+  <section class="panel">
+    <div class="panel-header">
+      <h2>Download Queue</h2>
+      <button class="collapse-btn" id="mega-toggle" onclick="toggleCollapse('mega-body','mega-toggle')" title="Collapse">▾</button>
+    </div>
+    <div id="mega-body">
+      <textarea
+        id="links"
+        placeholder="Paste Mega links here, one per line&#10;&#10;https://mega.nz/file/...&#10;https://mega.nz/folder/..."
+      ></textarea>
+      <div class="dl-row">
+        <button id="dl-btn" onclick="queueDownloads()">Download</button>
+      </div>
+      <div class="dl-errors hidden" id="dl-errors">
+        <div class="dl-errors-header">
+          <span id="dl-errors-title">Download errors</span>
+          <button onclick="clearDlErrors()" title="Dismiss">×</button>
+        </div>
+        <div id="dl-errors-body"></div>
+      </div>
+
+      <div id="transfer-stats" class="transfer-stats hidden"></div>
+      <div class="toolbar">
+        <button onclick="bulkAction('pause')">Pause All</button>
+        <button onclick="bulkAction('resume')">Resume All</button>
+        <button class="danger" onclick="bulkAction('cancel')">Cancel All</button>
+        <button class="success" id="dismiss-completed-btn" onclick="dismissCompleted()" style="display:none">Dismiss Completed</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Filename</th>
+              <th>Status</th>
+              <th>Progress</th>
+              <th>Size</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="tbody">
+            <tr><td colspan="5" class="empty">Loading transfers…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="truncation-warn hidden" id="truncation-warn">
+        ⚠ Showing 200 transfers — list may be truncated. Cancel or clear completed transfers to see all.
+      </div>
+      <div class="refresh-hint" id="refresh-hint">Auto-refreshes every 5 seconds</div>
     </div>
   </section>
 
@@ -586,46 +657,94 @@
 
   <!-- Archive.org Downloads -->
   <section class="panel">
-    <h2>Archive.org Downloads</h2>
-    <div class="dl-row">
-      <input type="text" id="archive-url" placeholder="https://archive.org/details/some-item">
-      <button id="archive-btn" onclick="browseArchive()">Browse</button>
+    <div class="panel-header">
+      <h2>Archive.org Downloads</h2>
+      <button class="collapse-btn" id="archive-toggle" onclick="toggleCollapse('archive-body','archive-toggle')" title="Collapse">▾</button>
+    </div>
+    <div id="archive-body">
+      <div class="dl-row">
+        <input type="text" id="archive-url" placeholder="https://archive.org/details/some-item">
+        <button id="archive-btn" onclick="browseArchive()">Browse</button>
+      </div>
     </div>
   </section>
 
   <!-- Direct Downloads (aria2) -->
   <section class="panel">
-    <h2>Direct Downloads</h2>
-    <textarea
-      id="aria2-links"
-      placeholder="Paste direct download URLs or magnet links here, one per line"
-    ></textarea>
-    <div class="dl-row">
-      <button id="aria2-dl-btn" onclick="queueAria2Downloads()">Download</button>
+    <div class="panel-header">
+      <h2>Direct Downloads</h2>
+      <button class="collapse-btn" id="direct-toggle" onclick="toggleCollapse('direct-body','direct-toggle')" title="Collapse">▾</button>
+    </div>
+    <div id="direct-body">
+      <textarea
+        id="aria2-links"
+        placeholder="Paste direct download URLs or magnet links here, one per line"
+      ></textarea>
+      <div class="dl-row">
+        <button id="aria2-dl-btn" onclick="queueAria2Downloads()">Download</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- aria2 Downloads (shared list: archive.org, direct, torrent) -->
+  <section class="panel">
+    <div class="panel-header">
+      <h2>aria2 Downloads</h2>
+      <button class="collapse-btn" id="aria2list-toggle" onclick="toggleCollapse('aria2list-body','aria2list-toggle')" title="Collapse">▾</button>
+    </div>
+    <div id="aria2list-body">
+      <div class="toolbar">
+        <button onclick="aria2BulkAction('pause')">Pause All</button>
+        <button onclick="aria2BulkAction('resume')">Resume All</button>
+        <button class="danger" onclick="aria2BulkAction('cancel')">Cancel All</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Filename</th>
+              <th>Status</th>
+              <th>Progress</th>
+              <th>Speed</th>
+              <th>Size</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="aria2-tbody">
+            <tr><td colspan="6" class="empty">Loading transfers…</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="refresh-hint" id="aria2-refresh-hint">Auto-refreshes every 5 seconds</div>
     </div>
   </section>
 
   <!-- YouTube Downloads -->
   <section class="panel">
-    <h2>YouTube Downloads</h2>
-    <div class="dl-row">
-      <input type="text" id="youtube-url" placeholder="https://www.youtube.com/watch?v=... or a playlist URL">
-      <button id="youtube-dl-btn" onclick="queueYoutubeDownload()">Download</button>
+    <div class="panel-header">
+      <h2>YouTube Downloads</h2>
+      <button class="collapse-btn" id="youtube-toggle" onclick="toggleCollapse('youtube-body','youtube-toggle')" title="Collapse">▾</button>
     </div>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Filename</th>
-            <th>Status</th>
-            <th>Progress</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="youtube-tbody">
-          <tr><td colspan="4" class="empty">No YouTube downloads</td></tr>
-        </tbody>
-      </table>
+    <div id="youtube-body">
+      <div class="dl-row">
+        <input type="text" id="youtube-url" placeholder="https://www.youtube.com/watch?v=... or a playlist URL">
+        <button id="youtube-dl-btn" onclick="queueYoutubeDownload()">Download</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Filename</th>
+              <th>Status</th>
+              <th>Progress</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="youtube-tbody">
+            <tr><td colspan="4" class="empty">No YouTube downloads</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   </section>
 
@@ -655,71 +774,11 @@
     </div>
   </section>
 
-  <!-- Transfer Manager -->
-  <section class="panel">
-    <h2>Transfer Manager</h2>
-    <div id="transfer-stats" class="transfer-stats hidden"></div>
-    <div class="toolbar">
-      <button onclick="bulkAction('pause')">Pause All</button>
-      <button onclick="bulkAction('resume')">Resume All</button>
-      <button class="danger" onclick="bulkAction('cancel')">Cancel All</button>
-      <button class="success" id="dismiss-completed-btn" onclick="dismissCompleted()" style="display:none">Dismiss Completed</button>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Filename</th>
-            <th>Status</th>
-            <th>Progress</th>
-            <th>Size</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="tbody">
-          <tr><td colspan="5" class="empty">Loading transfers…</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <div class="truncation-warn hidden" id="truncation-warn">
-      ⚠ Showing 200 transfers — list may be truncated. Cancel or clear completed transfers to see all.
-    </div>
-    <div class="refresh-hint" id="refresh-hint">Auto-refreshes every 5 seconds</div>
-  </section>
-
-  <!-- aria2 Downloads -->
-  <section class="panel">
-    <h2>aria2 Downloads</h2>
-    <div class="toolbar">
-      <button onclick="aria2BulkAction('pause')">Pause All</button>
-      <button onclick="aria2BulkAction('resume')">Resume All</button>
-      <button class="danger" onclick="aria2BulkAction('cancel')">Cancel All</button>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Filename</th>
-            <th>Status</th>
-            <th>Progress</th>
-            <th>Speed</th>
-            <th>Size</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="aria2-tbody">
-          <tr><td colspan="6" class="empty">Loading transfers…</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <div class="refresh-hint" id="aria2-refresh-hint">Auto-refreshes every 5 seconds</div>
-  </section>
-
   <!-- History -->
   <section class="panel" id="history-panel">
     <div class="panel-header">
       <h2>History</h2>
-      <button class="collapse-btn" id="history-toggle" onclick="toggleHistory()" title="Expand">▸</button>
+      <button class="collapse-btn" id="history-toggle" onclick="toggleCollapse('history-body','history-toggle')" title="Expand">▸</button>
     </div>
     <div id="history-body" style="display:none">
       <div id="history-log" class="history-log"></div>
@@ -728,6 +787,15 @@
         <span style="color:var(--muted);font-size:12px;margin-left:auto" id="log-hint">Last 200 entries</span>
       </div>
     </div>
+  </section>
+
+  <!-- Destination (applies to all downloaders) -->
+  <section class="panel">
+    <h2>Destination</h2>
+    <div class="dl-row">
+      <input type="text" id="global-dest" value="/downloads/" placeholder="Destination path">
+    </div>
+    <div class="refresh-hint">Applies to every downloader above (MEGA, archive.org, direct, torrents, YouTube)</div>
   </section>
 </main>
 
@@ -859,7 +927,7 @@
     }
     if (!all.length) return;
 
-    const dest    = document.getElementById('dest').value;
+    const dest    = document.getElementById('global-dest').value;
     const folders = all.filter(l => /mega\.nz\/folder\//i.test(l));
     const files   = all.filter(l => !/mega\.nz\/folder\//i.test(l));
 
@@ -919,9 +987,10 @@
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>Queuing…';
     try {
+      const dest = document.getElementById('global-dest').value;
       const { results } = await apiFetch('/api/aria2/add', {
         method: 'POST',
-        body: JSON.stringify({ links }),
+        body: JSON.stringify({ links, dest }),
       });
       const ok  = results.filter(r => r.success);
       const bad = results.filter(r => !r.success);
@@ -1082,8 +1151,9 @@
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>Queuing…';
     try {
+      const dest = document.getElementById('global-dest').value;
       const { results } = await apiFetch('/api/archive/confirm', {
-        method: 'POST', body: JSON.stringify({ identifier: archiveIdentifier, files }),
+        method: 'POST', body: JSON.stringify({ identifier: archiveIdentifier, files, dest }),
       });
       const ok  = results.filter(r => r.success);
       const bad = results.filter(r => !r.success);
@@ -1116,7 +1186,8 @@
     document.getElementById('torrent-confirm-btn').disabled = true;
     torrentGid = null;
 
-    apiFetch('/api/torrent/browse', { method: 'POST', body: JSON.stringify({ link }) })
+    const dest = document.getElementById('global-dest').value;
+    apiFetch('/api/torrent/browse', { method: 'POST', body: JSON.stringify({ link, dest }) })
       .then(({ gid, files }) => {
         torrentGid = gid;
         document.getElementById('torrent-loading').style.display = 'none';
@@ -1398,17 +1469,25 @@
 
   // ── YouTube downloads ────────────────────────────────────────────────────────
   async function queueYoutubeDownload() {
-    const input = document.getElementById('youtube-url');
-    const url = input.value.trim();
+    const url = document.getElementById('youtube-url').value.trim();
     if (!url) { toast('Enter a YouTube URL', 'error'); return; }
 
+    if (/[?&]list=/i.test(url)) {
+      openYoutubePlaylistPicker(url);
+      return;
+    }
+    await startYoutubeDownload(url);
+  }
+
+  async function startYoutubeDownload(url, items) {
     const btn = document.getElementById('youtube-dl-btn');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>Queuing…';
     try {
-      await apiFetch('/api/youtube/add', { method: 'POST', body: JSON.stringify({ url }) });
+      const dest = document.getElementById('global-dest').value;
+      await apiFetch('/api/youtube/add', { method: 'POST', body: JSON.stringify({ url, dest, items }) });
       toast('YouTube download queued', 'success');
-      input.value = '';
+      document.getElementById('youtube-url').value = '';
       loadYoutubeJobs();
     } catch (err) {
       toast(`Request failed: ${err.message}`, 'error');
@@ -1416,6 +1495,80 @@
       btn.disabled = false;
       btn.textContent = 'Download';
     }
+  }
+
+  // ── YouTube playlist picker ──────────────────────────────────────────────────
+  let ytPlaylistUrl = null;
+
+  function openYoutubePlaylistPicker(url) {
+    ytPlaylistUrl = url;
+    const overlay = document.getElementById('ytplaylist-overlay');
+    overlay.classList.remove('hidden');
+    document.getElementById('ytplaylist-loading').style.display = 'block';
+    document.getElementById('ytplaylist-content').style.display = 'none';
+    document.getElementById('ytplaylist-error').classList.add('hidden');
+    document.getElementById('ytplaylist-confirm-btn').disabled = true;
+
+    apiFetch('/api/youtube/browse-playlist', { method: 'POST', body: JSON.stringify({ url }) })
+      .then(({ entries }) => {
+        document.getElementById('ytplaylist-loading').style.display = 'none';
+        renderYtPlaylistEntries(entries);
+        document.getElementById('ytplaylist-content').style.display = 'flex';
+        document.getElementById('ytplaylist-confirm-btn').disabled = false;
+        updateYtPlaylistCount();
+      })
+      .catch(err => {
+        document.getElementById('ytplaylist-loading').style.display = 'none';
+        const el = document.getElementById('ytplaylist-error');
+        el.innerHTML = `<div class="dl-errors-header"><span>${esc(err.message)}</span></div>`;
+        el.classList.remove('hidden');
+      });
+  }
+
+  function renderYtPlaylistEntries(entries) {
+    document.getElementById('ytplaylist-tbody').innerHTML = entries.map(e => `<tr>
+        <td style="padding:7px 6px 7px 11px">
+          <input type="checkbox" class="ytplaylist-cb" data-index="${e.index}" checked>
+        </td>
+        <td style="color:var(--muted);white-space:nowrap">${e.index}</td>
+        <td class="filename-cell" title="${esc(e.title)}">${esc(e.title)}</td>
+      </tr>`).join('');
+    document.getElementById('ytplaylist-tbody').querySelectorAll('.ytplaylist-cb')
+      .forEach(cb => cb.addEventListener('change', updateYtPlaylistCount));
+  }
+
+  function updateYtPlaylistCount() {
+    const all     = document.querySelectorAll('.ytplaylist-cb').length;
+    const checked = document.querySelectorAll('.ytplaylist-cb:checked').length;
+    document.getElementById('ytplaylist-count').textContent = `${checked} / ${all} selected`;
+  }
+
+  function ytPlaylistSelectAll(select) {
+    document.querySelectorAll('.ytplaylist-cb').forEach(cb => { cb.checked = select; });
+    updateYtPlaylistCount();
+  }
+
+  async function ytPlaylistConfirm() {
+    const items = [...document.querySelectorAll('.ytplaylist-cb:checked')].map(cb => Number(cb.dataset.index));
+    if (!items.length) { toast('No videos selected', 'error'); return; }
+    const btn = document.getElementById('ytplaylist-confirm-btn');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Queuing…';
+    try {
+      await startYoutubeDownload(ytPlaylistUrl, items);
+      document.getElementById('ytplaylist-overlay').classList.add('hidden');
+      ytPlaylistUrl = null;
+    } catch (err) {
+      toast(`Error: ${err.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Download Selected';
+    }
+  }
+
+  function ytPlaylistDismiss() {
+    document.getElementById('ytplaylist-overlay').classList.add('hidden');
+    ytPlaylistUrl = null;
   }
 
   async function youtubeAction(action, id) {
@@ -1535,13 +1688,13 @@
     toast('Retry queue cleared', 'success');
   }
 
-  // ── History ─────────────────────────────────────────────────────────────────
-  let historyCollapsed = true;
-
-  function toggleHistory() {
-    historyCollapsed = !historyCollapsed;
-    document.getElementById('history-body').style.display = historyCollapsed ? 'none' : '';
-    document.getElementById('history-toggle').textContent = historyCollapsed ? '▸' : '▾';
+  // ── Collapsible sections ─────────────────────────────────────────────────────
+  function toggleCollapse(bodyId, btnId) {
+    const body = document.getElementById(bodyId);
+    const btn = document.getElementById(btnId);
+    const collapsing = body.style.display !== 'none';
+    body.style.display = collapsing ? 'none' : '';
+    btn.textContent = collapsing ? '▸' : '▾';
   }
 
   async function loadLog() {
@@ -1600,6 +1753,9 @@
   document.getElementById('torrent-confirm-btn').addEventListener('click', torrentConfirm);
   document.getElementById('torrent-cancel-btn').addEventListener('click', torrentDismiss);
   document.getElementById('torrent-close').addEventListener('click', torrentDismiss);
+  document.getElementById('ytplaylist-confirm-btn').addEventListener('click', ytPlaylistConfirm);
+  document.getElementById('ytplaylist-cancel-btn').addEventListener('click', ytPlaylistDismiss);
+  document.getElementById('ytplaylist-close').addEventListener('click', ytPlaylistDismiss);
 
   // ── Init ────────────────────────────────────────────────────────────────────
   checkStatus();
