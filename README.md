@@ -19,7 +19,7 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 
 ## Features
 
-- **Download queue** — paste one or more Mega links and queue them all at once; its own transfer table (progress/speed/size) is built into the same panel
+- **MEGA downloads** — paste one or more Mega links and queue them all at once; its own transfer table (progress/speed/size) is built into the same panel
 - **Base64 link decoding** — pasted links that turn out to be base64-encoded are transparently decoded; a decoded MEGA link is queued automatically, anything else is surfaced in a "Needs Attention" panel instead of silently failing
 - **Folder file picker** — for `mega.nz/folder/` links, browse contents and select individual files before downloading
 - **Bandwidth quota handling** — quota-exceeded downloads are automatically added to a retry queue and retried every 15 minutes
@@ -28,9 +28,12 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 - **Torrent file picker** — magnet links open a file picker once aria2 resolves the torrent's metadata, so you can select just the files you want before any data downloads
 - **YouTube downloads** — paste a `youtube.com`/`youtu.be` URL to download the video as the highest-quality mp4 available, via `yt-dlp`
 - **YouTube playlist picker** — paste a playlist URL (one with a `list=` parameter) to open a picker listing every video in the playlist, so you can uncheck the ones you don't want before downloading. Kept videos are saved into a folder named after the playlist title, numbered in playlist order
-- **Single shared destination** — one "Destination" field at the bottom of the page sets the save path for every downloader (MEGA, archive.org, direct, torrents, and YouTube)
+- **Playlist progress expand** — a downloading/finished playlist job can be expanded to see each video's individual status and progress (read-only — Cancel still stops the whole playlist job, since it's one `yt-dlp` process)
+- **Single shared destination** — one "Destination" field at the bottom of the page sets the save path for every downloader (MEGA, archive.org, direct, torrents, and YouTube), with a "Browse…" button to navigate server-side folders instead of typing a path
 - **Collapsible sections** — each downloader panel can be collapsed via the arrow in its header to reduce clutter
+- **Color-coded by download type** — MEGA, Archive.org, Direct, Torrent, and YouTube each get their own accent color in the section headings and the activity log (a bolder/saturated version of the same color marks a completed download; failures are always red)
 - **aria2 downloads table** — shared transfer table for archive.org, direct, and torrent downloads, with per-row and bulk pause/resume/cancel controls, auto-refreshing every 5 seconds
+- **Stats bars** — each transfer table (MEGA, aria2, YouTube) shows a live summary (count by status, total size where known)
 - **Per-transfer controls** — pause, resume, or cancel individual transfers (MEGA and aria2); cancel or dismiss individual YouTube jobs
 - **Bulk controls** — pause all, resume all, cancel all (MEGA and aria2 tables)
 - **Activity log** — history of downloads, failures, and queue events (last 200 entries)
@@ -124,6 +127,7 @@ cd /opt/docker/stack && docker compose up -d --build megacmd-ui
 | `ARIA2_RPC_SECRET` | *(empty)* | Shared secret for aria2 RPC auth — must match the `aria2` container's `RPC_SECRET` |
 | `YTDLP_BIN` | `yt-dlp` | Path/name of the `yt-dlp` binary to invoke for YouTube downloads |
 | `YTDLP_OUTPUT_DIR` | `/downloads/` | Directory `yt-dlp` writes finished videos to inside the container |
+| `FS_BROWSE_ROOT` | `/downloads` | Root directory the Destination "Browse…" folder picker is allowed to list; navigation can't escape above this path |
 
 ## Troubleshooting
 
@@ -185,6 +189,10 @@ docker exec megacmd-ui ffmpeg -version
 ```
 
 If either is missing, rebuild the image (`docker compose up -d --build megacmd-ui`) — they're installed in the `Dockerfile` and won't appear after a plain restart. YouTube frequently changes its site in ways that break older `yt-dlp` releases; if downloads that used to work start failing, rebuilding to pick up a newer `yt-dlp` from PyPI is usually the fix.
+
+### Destination "Browse…" button shows an error or empty list
+
+The folder picker lists directories under `FS_BROWSE_ROOT` (default `/downloads`) from inside the `megacmd-ui` container's own filesystem — it needs that path to exist and be mounted (see the `/mnt/media1/downloads:/downloads` volume in [Requirements](#requirements)). If it errors, confirm the mount is present the same way as the YouTube troubleshooting step above (`docker inspect megacmd-ui`).
 
 ## Local Development
 

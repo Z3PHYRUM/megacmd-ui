@@ -90,6 +90,10 @@
       text-transform: uppercase;
       color: var(--muted);
     }
+    .panel h2.h-mega    { color: #bd93f9; }
+    .panel h2.h-archive { color: #8be9fd; }
+    .panel h2.h-direct  { color: #ffb86c; }
+    .panel h2.h-youtube { color: #f1fa8c; }
 
     /* ── Form elements ── */
     textarea, input[type="text"] {
@@ -176,6 +180,7 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+    tr.yt-item-row td { background: rgba(255,255,255,0.02); font-size: 12px; }
     .link-cell {
       max-width: 280px;
       overflow: hidden;
@@ -296,10 +301,17 @@
       white-space: pre-wrap;
       word-break: break-all;
     }
-    .history-log .log-downloaded { color: #50fa7b; }
-    .history-log .log-queued     { color: #ffb86c; }
-    .history-log .log-failed     { color: #ff5555; }
-    .history-log .log-removed    { color: var(--muted); }
+    .history-log .log-mega               { color: rgba(189,147,249,0.65); }
+    .history-log .log-mega.log-complete  { color: rgb(189,147,249); font-weight: 700; }
+    .history-log .log-archive            { color: rgba(139,233,253,0.65); }
+    .history-log .log-archive.log-complete { color: rgb(139,233,253); font-weight: 700; }
+    .history-log .log-direct             { color: rgba(255,184,108,0.65); }
+    .history-log .log-direct.log-complete  { color: rgb(255,184,108); font-weight: 700; }
+    .history-log .log-torrent            { color: rgba(255,121,198,0.65); }
+    .history-log .log-torrent.log-complete { color: rgb(255,121,198); font-weight: 700; }
+    .history-log .log-youtube            { color: rgba(241,250,140,0.65); }
+    .history-log .log-youtube.log-complete { color: rgb(241,250,140); font-weight: 700; }
+    .history-log .log-failed             { color: #ff5555; font-weight: 700; }
     .history-empty { color: var(--muted); font-size: 13px; padding: 24px; text-align: center; }
 
     .collapse-btn {
@@ -593,11 +605,40 @@
   </div>
 </div>
 
+<!-- Destination folder browse modal -->
+<div id="fsbrowse-overlay" class="browse-overlay hidden">
+  <div class="browse-modal">
+    <div class="browse-header">
+      <span>Select Destination Folder</span>
+      <button class="icon" id="fsbrowse-close" title="Cancel">✕</button>
+    </div>
+    <div class="browse-body">
+      <div id="fsbrowse-path" style="color:var(--muted);font-size:12px;margin-bottom:8px;word-break:break-all"></div>
+      <div id="fsbrowse-loading" class="browse-loading" style="display:none">
+        <span class="spinner"></span>Loading…
+      </div>
+      <div id="fsbrowse-content" style="display:flex; flex-direction:column; gap:10px; flex:1; min-height:0;">
+        <div class="browse-file-wrap table-wrap">
+          <table>
+            <thead><tr><th>Folder</th></tr></thead>
+            <tbody id="fsbrowse-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="fsbrowse-error" class="dl-errors hidden"></div>
+    </div>
+    <div class="browse-footer">
+      <button class="secondary" id="fsbrowse-cancel-btn">Cancel</button>
+      <button id="fsbrowse-select-btn">Select This Folder</button>
+    </div>
+  </div>
+</div>
+
 <main>
   <!-- Download Queue (MEGA) -->
   <section class="panel">
     <div class="panel-header">
-      <h2>Download Queue</h2>
+      <h2 class="h-mega">MEGA Downloads</h2>
       <button class="collapse-btn" id="mega-toggle" onclick="toggleCollapse('mega-body','mega-toggle')" title="Collapse">▾</button>
     </div>
     <div id="mega-body">
@@ -658,7 +699,7 @@
   <!-- Archive.org Downloads -->
   <section class="panel">
     <div class="panel-header">
-      <h2>Archive.org Downloads</h2>
+      <h2 class="h-archive">Archive.org Downloads</h2>
       <button class="collapse-btn" id="archive-toggle" onclick="toggleCollapse('archive-body','archive-toggle')" title="Collapse">▾</button>
     </div>
     <div id="archive-body">
@@ -672,7 +713,7 @@
   <!-- Direct Downloads (aria2) -->
   <section class="panel">
     <div class="panel-header">
-      <h2>Direct Downloads</h2>
+      <h2 class="h-direct">Direct Downloads</h2>
       <button class="collapse-btn" id="direct-toggle" onclick="toggleCollapse('direct-body','direct-toggle')" title="Collapse">▾</button>
     </div>
     <div id="direct-body">
@@ -693,6 +734,7 @@
       <button class="collapse-btn" id="aria2list-toggle" onclick="toggleCollapse('aria2list-body','aria2list-toggle')" title="Collapse">▾</button>
     </div>
     <div id="aria2list-body">
+      <div id="aria2-stats" class="transfer-stats hidden"></div>
       <div class="toolbar">
         <button onclick="aria2BulkAction('pause')">Pause All</button>
         <button onclick="aria2BulkAction('resume')">Resume All</button>
@@ -722,7 +764,7 @@
   <!-- YouTube Downloads -->
   <section class="panel">
     <div class="panel-header">
-      <h2>YouTube Downloads</h2>
+      <h2 class="h-youtube">YouTube Downloads</h2>
       <button class="collapse-btn" id="youtube-toggle" onclick="toggleCollapse('youtube-body','youtube-toggle')" title="Collapse">▾</button>
     </div>
     <div id="youtube-body">
@@ -730,6 +772,7 @@
         <input type="text" id="youtube-url" placeholder="https://www.youtube.com/watch?v=... or a playlist URL">
         <button id="youtube-dl-btn" onclick="queueYoutubeDownload()">Download</button>
       </div>
+      <div id="youtube-stats" class="transfer-stats hidden"></div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -794,6 +837,7 @@
     <h2>Destination</h2>
     <div class="dl-row">
       <input type="text" id="global-dest" value="/downloads/" placeholder="Destination path">
+      <button class="secondary" onclick="openFolderBrowser()">Browse…</button>
     </div>
     <div class="refresh-hint">Applies to every downloader above (MEGA, archive.org, direct, torrents, YouTube)</div>
   </section>
@@ -1257,6 +1301,55 @@
     }
   }
 
+  // ── Destination folder browser ──────────────────────────────────────────────
+  function openFolderBrowser() {
+    document.getElementById('fsbrowse-overlay').classList.remove('hidden');
+    loadFsBrowse('');
+  }
+
+  function loadFsBrowse(rel) {
+    document.getElementById('fsbrowse-loading').style.display = 'block';
+    document.getElementById('fsbrowse-content').style.display = 'none';
+    document.getElementById('fsbrowse-error').classList.add('hidden');
+    apiFetch(`/api/fs/browse?path=${encodeURIComponent(rel)}`)
+      .then(({ path: fullPath, rel: newRel, dirs }) => {
+        document.getElementById('fsbrowse-loading').style.display = 'none';
+        document.getElementById('fsbrowse-content').style.display = 'flex';
+        document.getElementById('fsbrowse-path').textContent = fullPath;
+        renderFsBrowseDirs(dirs, newRel);
+      })
+      .catch(err => {
+        document.getElementById('fsbrowse-loading').style.display = 'none';
+        const el = document.getElementById('fsbrowse-error');
+        el.innerHTML = `<div class="dl-errors-header"><span>${esc(err.message)}</span></div>`;
+        el.classList.remove('hidden');
+      });
+  }
+
+  function renderFsBrowseDirs(dirs, rel) {
+    const rows = [];
+    if (rel) rows.push(`<tr class="fsbrowse-row" data-rel="${esc(rel.split('/').slice(0, -1).join('/'))}"><td>⬑ ..</td></tr>`);
+    rows.push(...dirs.map(d => `<tr class="fsbrowse-row" data-rel="${esc(rel ? rel + '/' + d : d)}"><td>📁 ${esc(d)}</td></tr>`));
+    document.getElementById('fsbrowse-tbody').innerHTML = rows.length
+      ? rows.join('')
+      : '<tr><td class="empty">No subfolders</td></tr>';
+  }
+
+  document.getElementById('fsbrowse-tbody').addEventListener('click', e => {
+    const row = e.target.closest('tr[data-rel]');
+    if (!row) return;
+    loadFsBrowse(row.dataset.rel);
+  });
+
+  function fsBrowseSelect() {
+    document.getElementById('global-dest').value = document.getElementById('fsbrowse-path').textContent;
+    document.getElementById('fsbrowse-overlay').classList.add('hidden');
+  }
+
+  function fsBrowseDismiss() {
+    document.getElementById('fsbrowse-overlay').classList.add('hidden');
+  }
+
   // ── Download error panel ─────────────────────────────────────────────────--
   function showDlErrors(failures) {
     const panel = document.getElementById('dl-errors');
@@ -1322,6 +1415,24 @@
   }
 
   // ── Transfer table ───────────────────────────────────────────────────────--
+  // Shared stats-bar builder used by MEGA, aria2, and YouTube sections.
+  const STATUS_ORDER = ['downloading', 'uploading', 'queued', 'starting', 'paused', 'error', 'complete', 'cancelled'];
+
+  function buildStatsHtml(items, noun, totalBytesOf) {
+    const counts = {};
+    let totalBytes = 0;
+    for (const it of items) {
+      counts[it.status] = (counts[it.status] || 0) + 1;
+      if (totalBytesOf) totalBytes += totalBytesOf(it);
+    }
+    const parts = [`<span><strong>${items.length}</strong> ${noun}${items.length !== 1 ? 's' : ''}</span>`];
+    for (const s of [...STATUS_ORDER, ...Object.keys(counts).filter(k => !STATUS_ORDER.includes(k))]) {
+      if (counts[s]) parts.push(`<span><strong>${counts[s]}</strong> ${s}</span>`);
+    }
+    if (totalBytes > 0) parts.push(`<span><strong>${fmtBytes(totalBytes)}</strong> total</span>`);
+    return parts.join('<span class="sep">·</span>');
+  }
+
   function renderTransfers(transfers) {
     const tbody   = document.getElementById('tbody');
     const statsEl = document.getElementById('transfer-stats');
@@ -1337,20 +1448,7 @@
     document.getElementById('dismiss-completed-btn').style.display =
       transfers.some(t => t.status === 'complete') ? '' : 'none';
 
-    // Compute stats
-    const counts = {};
-    let totalBytes = 0;
-    for (const t of transfers) {
-      counts[t.status] = (counts[t.status] || 0) + 1;
-      totalBytes += parseBytes(t.total);
-    }
-    const statParts = [`<span><strong>${transfers.length}</strong> transfer${transfers.length !== 1 ? 's' : ''}</span>`];
-    const ORDER = ['downloading', 'uploading', 'queued', 'paused', 'error', 'complete'];
-    for (const s of [...ORDER, ...Object.keys(counts).filter(k => !ORDER.includes(k))]) {
-      if (counts[s]) statParts.push(`<span><strong>${counts[s]}</strong> ${s}</span>`);
-    }
-    if (totalBytes > 0) statParts.push(`<span><strong>${fmtBytes(totalBytes)}</strong> total</span>`);
-    statsEl.innerHTML = statParts.join('<span class="sep">·</span>');
+    statsEl.innerHTML = buildStatsHtml(transfers, 'transfer', t => parseBytes(t.total));
     statsEl.classList.remove('hidden');
 
     tbody.innerHTML = transfers.map(t => {
@@ -1418,11 +1516,17 @@
   function aria2BulkAction(action) { aria2Action(action, 'all'); }
 
   function renderAria2Transfers(transfers) {
-    const tbody = document.getElementById('aria2-tbody');
+    const tbody   = document.getElementById('aria2-tbody');
+    const statsEl = document.getElementById('aria2-stats');
     if (!transfers?.length) {
       tbody.innerHTML = '<tr><td colspan="6" class="empty">No aria2 downloads</td></tr>';
+      statsEl.classList.add('hidden');
       return;
     }
+
+    statsEl.innerHTML = buildStatsHtml(transfers, 'download', t => t.total || 0);
+    statsEl.classList.remove('hidden');
+
     tbody.innerHTML = transfers.map(t => {
       const pct = Math.min(t.progress || 0, 100);
       const badge = t.status || 'unknown';
@@ -1526,7 +1630,7 @@
   }
 
   function renderYtPlaylistEntries(entries) {
-    document.getElementById('ytplaylist-tbody').innerHTML = entries.map(e => `<tr>
+    document.getElementById('ytplaylist-tbody').innerHTML = entries.map(e => `<tr data-title="${esc(e.title)}">
         <td style="padding:7px 6px 7px 11px">
           <input type="checkbox" class="ytplaylist-cb" data-index="${e.index}" checked>
         </td>
@@ -1549,7 +1653,10 @@
   }
 
   async function ytPlaylistConfirm() {
-    const items = [...document.querySelectorAll('.ytplaylist-cb:checked')].map(cb => Number(cb.dataset.index));
+    const items = [...document.querySelectorAll('.ytplaylist-cb:checked')].map(cb => ({
+      index: Number(cb.dataset.index),
+      title: cb.closest('tr').dataset.title,
+    }));
     if (!items.length) { toast('No videos selected', 'error'); return; }
     const btn = document.getElementById('ytplaylist-confirm-btn');
     btn.disabled = true;
@@ -1580,12 +1687,20 @@
     }
   }
 
+  const expandedYtJobs = new Set();
+
   function renderYoutubeJobs(jobs) {
-    const tbody = document.getElementById('youtube-tbody');
+    const tbody   = document.getElementById('youtube-tbody');
+    const statsEl = document.getElementById('youtube-stats');
     if (!jobs?.length) {
       tbody.innerHTML = '<tr><td colspan="4" class="empty">No YouTube downloads</td></tr>';
+      statsEl.classList.add('hidden');
       return;
     }
+
+    statsEl.innerHTML = buildStatsHtml(jobs, 'job');
+    statsEl.classList.remove('hidden');
+
     tbody.innerHTML = jobs.map(j => {
       const pct = Math.min(j.progress || 0, 100);
       const isDone = ['complete', 'error', 'cancelled'].includes(j.status);
@@ -1593,8 +1708,13 @@
       const actions = isDone
         ? `<button class="secondary sm" data-action="dismiss" data-id="${esc(j.id)}">Dismiss</button>`
         : `<button class="danger sm" data-action="cancel" data-id="${esc(j.id)}">Cancel</button>`;
-      return `<tr>
-        <td class="filename-cell" title="${esc(j.error || j.filename)}">${esc(j.filename)}</td>
+      const hasItems = j.isPlaylist && j.items?.length;
+      const expanded = expandedYtJobs.has(j.id);
+      const expandBtn = hasItems
+        ? `<button class="icon sm yt-expand-btn" data-id="${esc(j.id)}" title="${expanded ? 'Collapse' : 'Expand'}" style="margin-right:6px">${expanded ? '▾' : '▸'}</button>`
+        : '';
+      const row = `<tr>
+        <td class="filename-cell" title="${esc(j.error || j.filename)}">${expandBtn}${esc(j.filename)}</td>
         <td><span class="badge ${esc(j.status)}">${esc(badgeText)}</span></td>
         <td><div class="pbar-wrap">
           <div class="pbar"><div class="pbar-fill" style="width:${pct}%"></div></div>
@@ -1602,10 +1722,32 @@
         </div></td>
         <td><div class="row-actions">${actions}</div></td>
       </tr>`;
+      if (!hasItems || !expanded) return row;
+      const itemRows = j.items.map(it => {
+        const ipct = Math.min(it.progress || 0, 100);
+        const itBadgeText = it.status === 'complete' ? 'Complete!' : it.status;
+        return `<tr class="yt-item-row">
+          <td class="filename-cell" style="padding-left:30px" title="${esc(it.title)}">${it.index}. ${esc(it.title)}</td>
+          <td><span class="badge ${esc(it.status)}">${esc(itBadgeText)}</span></td>
+          <td><div class="pbar-wrap">
+            <div class="pbar"><div class="pbar-fill" style="width:${ipct}%"></div></div>
+            <span class="pct">${ipct.toFixed(0)}%</span>
+          </div></td>
+          <td></td>
+        </tr>`;
+      }).join('');
+      return row + itemRows;
     }).join('');
   }
 
   document.getElementById('youtube-tbody').addEventListener('click', e => {
+    const expandBtn = e.target.closest('.yt-expand-btn');
+    if (expandBtn) {
+      const id = expandBtn.dataset.id;
+      if (expandedYtJobs.has(id)) expandedYtJobs.delete(id); else expandedYtJobs.add(id);
+      loadYoutubeJobs();
+      return;
+    }
     const btn = e.target.closest('button[data-action]');
     if (!btn) return;
     youtubeAction(btn.dataset.action, btn.dataset.id);
@@ -1697,6 +1839,19 @@
     btn.textContent = collapsing ? '▸' : '▾';
   }
 
+  function classifyLogLine(line) {
+    const m = line.match(/^\[[^\]]+\]\s+(\S+)/);
+    const event = m ? m[1] : '';
+    if (/FAILED$/.test(event)) return 'log-failed';
+    const type = /^YOUTUBE_/.test(event) ? 'youtube'
+      : /^ARCHIVE_/.test(event) ? 'archive'
+      : /^DIRECT_/.test(event) ? 'direct'
+      : /^TORRENT_/.test(event) ? 'torrent'
+      : 'mega';
+    const isComplete = event === 'DOWNLOADED' || event === 'YOUTUBE_DOWNLOADED';
+    return isComplete ? `log-${type} log-complete` : `log-${type}`;
+  }
+
   async function loadLog() {
     try {
       const { lines } = await apiFetch('/api/log');
@@ -1706,15 +1861,7 @@
         return;
       }
       const atBottom = el.scrollHeight - el.scrollTop <= el.clientHeight + 20;
-      el.innerHTML = lines.map(line => {
-        let cls = '';
-        if (/\bDOWNLOADED\b/.test(line))  cls = 'log-downloaded';
-        else if (/\bQUEUED\b/.test(line)) cls = 'log-queued';
-        else if (/\bFAILED\b/.test(line)) cls = 'log-failed';
-        else if (/\bREMOVED\b/.test(line)) cls = 'log-removed';
-        else if (/\bBROWSE\b/.test(line)) cls = 'log-queued';
-        return `<span class="${cls}">${esc(line)}</span>`;
-      }).join('\n');
+      el.innerHTML = lines.map(line => `<span class="${classifyLogLine(line)}">${esc(line)}</span>`).join('\n');
       if (atBottom) el.scrollTop = el.scrollHeight;
     } catch {}
   }
@@ -1756,6 +1903,9 @@
   document.getElementById('ytplaylist-confirm-btn').addEventListener('click', ytPlaylistConfirm);
   document.getElementById('ytplaylist-cancel-btn').addEventListener('click', ytPlaylistDismiss);
   document.getElementById('ytplaylist-close').addEventListener('click', ytPlaylistDismiss);
+  document.getElementById('fsbrowse-select-btn').addEventListener('click', fsBrowseSelect);
+  document.getElementById('fsbrowse-cancel-btn').addEventListener('click', fsBrowseDismiss);
+  document.getElementById('fsbrowse-close').addEventListener('click', fsBrowseDismiss);
 
   // ── Init ────────────────────────────────────────────────────────────────────
   checkStatus();

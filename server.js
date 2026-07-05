@@ -20,6 +20,7 @@ const QUEUE_FILE         = path.join(DATA_DIR, 'queue.json');
 const LOG_FILE           = path.join(DATA_DIR, 'activity.log');
 const YTDLP_BIN          = process.env.YTDLP_BIN || 'yt-dlp';
 const YTDLP_OUTPUT_DIR   = process.env.YTDLP_OUTPUT_DIR || '/downloads/';
+const FS_BROWSE_ROOT     = process.env.FS_BROWSE_ROOT || '/downloads';
 
 if (MOCK) console.log('[MOCK] Running in mock mode — no Docker commands will be executed');
 
@@ -273,8 +274,8 @@ let ytJobId = 0;
 const ytJobs = [];
 
 function serializeYtJob(job) {
-  const { id, url, filename, status, progress, error } = job;
-  return { id, url, filename, status, progress, error };
+  const { id, url, filename, status, progress, error, isPlaylist, items } = job;
+  return { id, url, filename, status, progress, error, isPlaylist, items };
 }
 
 function spawnYoutubeDownload(url, dest, items) {
@@ -292,6 +293,13 @@ function spawnYoutubeDownload(url, dest, items) {
     playlistTitle: '',
     itemIndex: 0,
     itemCount: 0,
+    // Read-only per-video status within a playlist job; a single yt-dlp
+    // process handles the whole playlist, so these reflect progress only —
+    // cancelling still stops the entire job, not one video.
+    items: (isPlaylist && Array.isArray(items) && items.length)
+      ? items.map(it => ({ index: it.index, title: it.title || `Video ${it.index}`, status: 'queued', progress: 0 }))
+          .sort((a, b) => a.index - b.index)
+      : [],
   };
   ytJobs.push(job);
 
@@ -305,7 +313,7 @@ function spawnYoutubeDownload(url, dest, items) {
     '--merge-output-format', 'mp4',
     '--newline',
     ...(isPlaylist ? [] : ['--no-playlist']),
-    ...(isPlaylist && Array.isArray(items) && items.length ? ['--playlist-items', items.join(',')] : []),
+    ...(job.items.length ? ['--playlist-items', job.items.map(it => it.index).join(',')] : []),
     '-o', outputTemplate,
     url,
   ]);
@@ -321,8 +329,19 @@ function spawnYoutubeDownload(url, dest, items) {
       const playlistTitle = line.match(/^\[download\] Downloading playlist:\s+(.+)$/);
       if (playlistTitle) job.playlistTitle = playlistTitle[1];
 
+      // N/M here are positions within the --playlist-items subset (in the
+      // same ascending order job.items was sorted/passed in), not absolute
+      // playlist indices, so job.items[N-1] is the item currently active.
       const item = line.match(/^\[download\] Downloading item (\d+) of (\d+)/);
-      if (item) { job.itemIndex = Number(item[1]); job.itemCount = Number(item[2]); }
+      if (item) {
+        job.itemIndex = Number(item[1]);
+        job.itemCount = Number(item[2]);
+        job.items.forEach((it, idx) => {
+          const pos = idx + 1;
+          if (pos < job.itemIndex) it.status = it.status === 'error' ? 'error' : 'complete';
+          else if (pos === job.itemIndex) it.status = 'downloading';
+        });
+      }
 
       const dest = line.match(/^\[download\] Destination:\s+(.+)$/) || line.match(/^\[Merger\] Merging formats into "(.+)"$/);
       if (dest) job.currentFile = basename(dest[1]);
@@ -333,6 +352,8 @@ function spawnYoutubeDownload(url, dest, items) {
         job.progress = (job.isPlaylist && job.itemCount > 0)
           ? ((job.itemIndex - 1) / job.itemCount * 100) + (itemPct / job.itemCount)
           : itemPct;
+        const cur = job.items[job.itemIndex - 1];
+        if (cur) cur.progress = itemPct;
       }
     }
     if (job.isPlaylist) {
@@ -351,10 +372,15 @@ function spawnYoutubeDownload(url, dest, items) {
     if (code === 0) {
       job.status = 'complete';
       job.progress = 100;
+      job.items.forEach(it => { it.status = 'complete'; it.progress = 100; });
       logActivity('YOUTUBE_DOWNLOADED', url, job.filename);
-    } else if (job.status !== 'cancelled') {
+    } else if (job.status === 'cancelled') {
+      job.items.forEach(it => { if (it.status !== 'complete') it.status = 'cancelled'; });
+    } else {
       job.status = 'error';
       job.error = (job.stderrTail.trim().split('\n').pop() || `yt-dlp exited with code ${code}`).replace(/^ERROR:\s*/, '');
+      const cur = job.items[job.itemIndex - 1];
+      if (cur && cur.status !== 'complete') cur.status = 'error';
       logActivity('YOUTUBE_FAILED', url, job.error);
     }
   });
@@ -824,10 +850,10 @@ app.post('/api/archive/confirm', async (req, res) => {
       name.split('/').map(encodeURIComponent).join('/')}`;
     try {
       const gid = await aria2AddUri(url, name, destination);
-      logActivity('ARIA2_QUEUED', name, identifier);
+      logActivity('ARCHIVE_QUEUED', name, identifier);
       results.push({ name, success: true, gid });
     } catch (err) {
-      logActivity('ARIA2_FAILED', name, err.message);
+      logActivity('ARCHIVE_FAILED', name, err.message);
       results.push({ name, success: false, error: err.message });
     }
   }
@@ -846,10 +872,10 @@ app.post('/api/aria2/add', async (req, res) => {
     if (!link) continue;
     try {
       const gid = await aria2AddUri(link, undefined, destination);
-      logActivity('ARIA2_QUEUED', link, 'direct');
+      logActivity('DIRECT_QUEUED', link);
       results.push({ link, success: true, gid });
     } catch (err) {
-      logActivity('ARIA2_FAILED', link, err.message);
+      logActivity('DIRECT_FAILED', link, err.message);
       results.push({ link, success: false, error: err.message });
     }
   }
@@ -878,10 +904,10 @@ app.post('/api/torrent/confirm', async (req, res) => {
   try {
     await aria2Call('changeOption', [gid, { 'select-file': files.join(',') }]);
     await aria2Call('unpause', [gid]);
-    logActivity('ARIA2_QUEUED', gid, 'torrent');
+    logActivity('TORRENT_QUEUED', gid);
     res.json({ success: true });
   } catch (err) {
-    logActivity('ARIA2_FAILED', gid, err.message);
+    logActivity('TORRENT_FAILED', gid, err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -989,6 +1015,26 @@ app.post('/api/youtube/dismiss', (req, res) => {
   const idx = ytJobs.findIndex(j => j.id === id);
   if (idx !== -1) ytJobs.splice(idx, 1);
   res.json({ success: true });
+});
+
+// ── Filesystem browse routes (Destination folder picker) ──────────────────────
+app.get('/api/fs/browse', (req, res) => {
+  const rawRel = typeof req.query.path === 'string' ? req.query.path : '';
+  // Normalizing against a virtual root of '/' collapses any '..' attempts to
+  // at most the root, so joining with FS_BROWSE_ROOT can never escape it.
+  const safeRel = path.normalize('/' + rawRel).replace(/^\/+|\/+$/g, '');
+  const target = safeRel ? path.join(FS_BROWSE_ROOT, safeRel) : FS_BROWSE_ROOT;
+
+  let dirs;
+  try {
+    dirs = fs.readdirSync(target, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => e.name)
+      .sort((a, b) => a.localeCompare(b));
+  } catch (err) {
+    return res.status(500).json({ error: `Could not read directory: ${err.message}` });
+  }
+  res.json({ path: target.endsWith('/') ? target : target + '/', rel: safeRel, dirs });
 });
 
 // ── Log routes ────────────────────────────────────────────────────────────────
