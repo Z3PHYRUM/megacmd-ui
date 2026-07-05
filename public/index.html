@@ -91,8 +91,6 @@
       color: var(--muted);
     }
     .panel h2.h-mega    { color: #bd93f9; }
-    .panel h2.h-archive { color: #8be9fd; }
-    .panel h2.h-direct  { color: #ffb86c; }
     .panel h2.h-youtube { color: #f1fa8c; }
 
     /* ── Form elements ── */
@@ -696,27 +694,17 @@
     <div id="attention-list"></div>
   </section>
 
-  <!-- Archive.org Downloads -->
+  <!-- aria2 Downloads (archive.org, direct, torrent all share one queue) -->
   <section class="panel">
     <div class="panel-header">
-      <h2 class="h-archive">Archive.org Downloads</h2>
-      <button class="collapse-btn" id="archive-toggle" onclick="toggleCollapse('archive-body','archive-toggle')" title="Collapse">▾</button>
+      <h2>aria2 Downloads</h2>
+      <button class="collapse-btn" id="aria2list-toggle" onclick="toggleCollapse('aria2list-body','aria2list-toggle')" title="Collapse">▾</button>
     </div>
-    <div id="archive-body">
+    <div id="aria2list-body">
       <div class="dl-row">
         <input type="text" id="archive-url" placeholder="https://archive.org/details/some-item">
-        <button id="archive-btn" onclick="browseArchive()">Browse</button>
+        <button id="archive-btn" onclick="browseArchive()">Browse Archive.org</button>
       </div>
-    </div>
-  </section>
-
-  <!-- Direct Downloads (aria2) -->
-  <section class="panel">
-    <div class="panel-header">
-      <h2 class="h-direct">Direct Downloads</h2>
-      <button class="collapse-btn" id="direct-toggle" onclick="toggleCollapse('direct-body','direct-toggle')" title="Collapse">▾</button>
-    </div>
-    <div id="direct-body">
       <textarea
         id="aria2-links"
         placeholder="Paste direct download URLs or magnet links here, one per line"
@@ -724,16 +712,7 @@
       <div class="dl-row">
         <button id="aria2-dl-btn" onclick="queueAria2Downloads()">Download</button>
       </div>
-    </div>
-  </section>
 
-  <!-- aria2 Downloads (shared list: archive.org, direct, torrent) -->
-  <section class="panel">
-    <div class="panel-header">
-      <h2>aria2 Downloads</h2>
-      <button class="collapse-btn" id="aria2list-toggle" onclick="toggleCollapse('aria2list-body','aria2list-toggle')" title="Collapse">▾</button>
-    </div>
-    <div id="aria2list-body">
       <div id="aria2-stats" class="transfer-stats hidden"></div>
       <div class="toolbar">
         <button onclick="aria2BulkAction('pause')">Pause All</button>
