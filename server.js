@@ -47,6 +47,7 @@ const DEFAULT_NOTIFICATIONS = {
   mega_failed: true,
   archive_queued: true,
   archive_completed: true,
+  all_finished: true,
 };
 
 let settings = { ntfyUrl: '', notifications: { ...DEFAULT_NOTIFICATIONS } };
@@ -695,6 +696,35 @@ async function processRetryQueue() {
 
 loadQueue();
 if (retryQueue.some(q => q.status === 'pending')) scheduleRetry();
+
+// ── All-queues-finished notification ─────────────────────────────────────────
+// Polls live state across every download subsystem so it also catches
+// completions our own routes don't directly await (e.g. resumed folder
+// downloads from /api/browse/confirm), firing once on the busy → idle edge.
+let queuesWereBusy = false;
+const ALL_FINISHED_POLL_MS = 15000;
+
+async function checkAllQueuesFinished() {
+  let busy = retryQueue.length > 0
+    || ytJobs.some(j => !['complete', 'error', 'cancelled'].includes(j.status));
+
+  if (!busy) {
+    try {
+      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
+      if (parseTransfers(raw).some(t => !['complete', 'error'].includes(t.status))) busy = true;
+    } catch {}
+  }
+
+  if (!busy) {
+    try {
+      if ((await aria2TellAll()).some(t => !['complete', 'error'].includes(t.status))) busy = true;
+    } catch {}
+  }
+
+  if (queuesWereBusy && !busy) notify('all_finished', 'MEGAcmd', 'All queues finished — nothing left downloading');
+  queuesWereBusy = busy;
+}
+setInterval(checkAllQueuesFinished, ALL_FINISHED_POLL_MS);
 
 // ── API routes ────────────────────────────────────────────────────────────────
 app.get('/api/status', async (req, res) => {

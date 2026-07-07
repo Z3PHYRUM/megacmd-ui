@@ -714,6 +714,7 @@
         <div class="settings-checkbox-row"><label><input type="checkbox" id="notif-mega_failed">MEGA download failed</label></div>
         <div class="settings-checkbox-row"><label><input type="checkbox" id="notif-archive_queued">Archive.org download queued</label></div>
         <div class="settings-checkbox-row"><label><input type="checkbox" id="notif-archive_completed">Archive.org download completed</label></div>
+        <div class="settings-checkbox-row"><label><input type="checkbox" id="notif-all_finished">All queues finished</label></div>
       </div>
     </div>
     <div class="browse-footer">
@@ -1906,7 +1907,7 @@
   }
 
   // ── Settings modal ───────────────────────────────────────────────────────────
-  const NOTIF_TYPES = ['mega_queued', 'mega_completed', 'mega_failed', 'archive_queued', 'archive_completed'];
+  const NOTIF_TYPES = ['mega_queued', 'mega_completed', 'mega_failed', 'archive_queued', 'archive_completed', 'all_finished'];
 
   function openSettings() {
     document.getElementById('settings-overlay').classList.remove('hidden');

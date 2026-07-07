@@ -37,7 +37,7 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 - **Per-transfer controls** — pause, resume, or cancel individual transfers (MEGA and aria2); cancel or dismiss individual YouTube jobs
 - **Bulk controls** — pause all, resume all, cancel all (MEGA and aria2 tables)
 - **Activity log** — history of downloads, failures, and queue events (last 200 entries)
-- **ntfy push notifications** — queued/completed/failed MEGA downloads and queued/completed archive.org downloads send a push notification via [ntfy](https://ntfy.sh); each event type can be toggled independently in Settings → Notifications, and the ntfy endpoint can be overridden there too (falls back to `NTFY_URL` otherwise); best-effort, a failed ntfy call never affects downloads
+- **ntfy push notifications** — queued/completed/failed MEGA downloads, queued/completed archive.org downloads, and an "all queues finished" notification (fires once when every MEGA transfer, aria2 download, retry-queue item, and YouTube job has finished, polled every 15s so it fires even with the UI closed) send a push notification via [ntfy](https://ntfy.sh); each event type can be toggled independently in Settings → Notifications, and the ntfy endpoint can be overridden there too (falls back to `NTFY_URL` otherwise); best-effort, a failed ntfy call never affects downloads
 - **Status bar** — shows MEGAcmd login status at a glance
 - **Dark theme** — mobile-friendly, no frameworks, no build step
 
