@@ -323,6 +323,56 @@
     }
     .collapse-btn:hover { color: var(--text); opacity: 1; }
 
+    /* ── Settings modal ── */
+    #settings-btn { margin-left: auto; font-size: 17px; }
+
+    .settings-tabs {
+      display: flex;
+      gap: 4px;
+      padding: 10px 18px 0;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .settings-tab {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: -1px;
+      padding: 8px 12px;
+    }
+    .settings-tab:hover  { color: var(--text); opacity: 1; }
+    .settings-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    .settings-label {
+      color: var(--muted);
+      display: block;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      margin: 14px 0 6px;
+      text-transform: uppercase;
+    }
+    .settings-label:first-child { margin-top: 0; }
+
+    .settings-checkbox-row { padding: 6px 0; }
+    .settings-checkbox-row label {
+      align-items: center;
+      cursor: pointer;
+      display: flex;
+      font-size: 13px;
+      gap: 8px;
+    }
+    .settings-checkbox-row input[type="checkbox"] {
+      accent-color: var(--accent);
+      cursor: pointer;
+      height: 15px;
+      width: 15px;
+    }
+
     /* ── Toasts ── */
     #toasts {
       position: fixed;
@@ -443,6 +493,7 @@
   <img src="/logo.svg" alt="MEGAcmd" class="app-logo">
   <div id="status-dot" class="dot"></div>
   <span id="status-text">Checking status…</span>
+  <button class="icon" id="settings-btn" title="Settings">⚙</button>
 </div>
 
 <div id="toasts"></div>
@@ -632,6 +683,46 @@
   </div>
 </div>
 
+<!-- Settings modal -->
+<div id="settings-overlay" class="browse-overlay hidden">
+  <div class="browse-modal" style="max-width:480px">
+    <div class="browse-header">
+      <span>Settings</span>
+      <button class="icon" id="settings-close" title="Close">✕</button>
+    </div>
+    <div class="settings-tabs">
+      <button class="settings-tab active" data-tab="general" onclick="switchSettingsTab('general')">General</button>
+      <button class="settings-tab" data-tab="notifications" onclick="switchSettingsTab('notifications')">Notifications</button>
+    </div>
+    <div class="browse-body">
+      <div id="settings-tab-general" class="settings-tab-panel">
+        <label class="settings-label">Destination</label>
+        <div class="dl-row" style="margin-top:0">
+          <input type="text" id="global-dest" value="/downloads/" placeholder="Destination path">
+          <button class="secondary" onclick="openFolderBrowser()">Browse…</button>
+        </div>
+        <div class="refresh-hint" style="text-align:left">Applies to every downloader (MEGA, archive.org, direct, torrents, YouTube)</div>
+      </div>
+      <div id="settings-tab-notifications" class="settings-tab-panel" style="display:none">
+        <label class="settings-label">ntfy Endpoint URL</label>
+        <input type="text" id="ntfy-url" placeholder="http://ntfy:2586/your-topic">
+        <div class="refresh-hint" style="text-align:left;margin-bottom:6px">Leave blank to use the server default: <span id="ntfy-url-default"></span></div>
+
+        <label class="settings-label">Notification Types</label>
+        <div class="settings-checkbox-row"><label><input type="checkbox" id="notif-mega_queued">MEGA download queued</label></div>
+        <div class="settings-checkbox-row"><label><input type="checkbox" id="notif-mega_completed">MEGA download completed</label></div>
+        <div class="settings-checkbox-row"><label><input type="checkbox" id="notif-mega_failed">MEGA download failed</label></div>
+        <div class="settings-checkbox-row"><label><input type="checkbox" id="notif-archive_queued">Archive.org download queued</label></div>
+        <div class="settings-checkbox-row"><label><input type="checkbox" id="notif-archive_completed">Archive.org download completed</label></div>
+      </div>
+    </div>
+    <div class="browse-footer">
+      <button class="secondary" id="settings-cancel-btn">Close</button>
+      <button id="settings-save-btn">Save</button>
+    </div>
+  </div>
+</div>
+
 <main>
   <!-- Download Queue (MEGA) -->
   <section class="panel">
@@ -809,16 +900,6 @@
         <span style="color:var(--muted);font-size:12px;margin-left:auto" id="log-hint">Last 200 entries</span>
       </div>
     </div>
-  </section>
-
-  <!-- Destination (applies to all downloaders) -->
-  <section class="panel">
-    <h2>Destination</h2>
-    <div class="dl-row">
-      <input type="text" id="global-dest" value="/downloads/" placeholder="Destination path">
-      <button class="secondary" onclick="openFolderBrowser()">Browse…</button>
-    </div>
-    <div class="refresh-hint">Applies to every downloader above (MEGA, archive.org, direct, torrents, YouTube)</div>
   </section>
 </main>
 
@@ -1321,7 +1402,7 @@
   });
 
   function fsBrowseSelect() {
-    document.getElementById('global-dest').value = document.getElementById('fsbrowse-path').textContent;
+    setDestination(document.getElementById('fsbrowse-path').textContent);
     document.getElementById('fsbrowse-overlay').classList.add('hidden');
   }
 
@@ -1818,6 +1899,60 @@
     btn.textContent = collapsing ? '▸' : '▾';
   }
 
+  // ── Destination persistence ──────────────────────────────────────────────────
+  function setDestination(value) {
+    document.getElementById('global-dest').value = value;
+    localStorage.setItem('megacmd-ui:dest', value);
+  }
+
+  // ── Settings modal ───────────────────────────────────────────────────────────
+  const NOTIF_TYPES = ['mega_queued', 'mega_completed', 'mega_failed', 'archive_queued', 'archive_completed'];
+
+  function openSettings() {
+    document.getElementById('settings-overlay').classList.remove('hidden');
+    loadSettingsIntoModal();
+  }
+
+  function closeSettings() {
+    document.getElementById('settings-overlay').classList.add('hidden');
+  }
+
+  function switchSettingsTab(tab) {
+    document.querySelectorAll('.settings-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+    document.getElementById('settings-tab-general').style.display = tab === 'general' ? '' : 'none';
+    document.getElementById('settings-tab-notifications').style.display = tab === 'notifications' ? '' : 'none';
+  }
+
+  async function loadSettingsIntoModal() {
+    try {
+      const { ntfyUrl, ntfyUrlDefault, notifications } = await apiFetch('/api/settings');
+      document.getElementById('ntfy-url').value = ntfyUrl || '';
+      document.getElementById('ntfy-url-default').textContent = ntfyUrlDefault;
+      NOTIF_TYPES.forEach(t => {
+        document.getElementById(`notif-${t}`).checked = notifications[t] !== false;
+      });
+    } catch (err) {
+      toast(`Could not load settings: ${err.message}`, 'error');
+    }
+  }
+
+  async function saveSettingsFromModal() {
+    const ntfyUrl = document.getElementById('ntfy-url').value.trim();
+    const notifications = {};
+    NOTIF_TYPES.forEach(t => { notifications[t] = document.getElementById(`notif-${t}`).checked; });
+    const btn = document.getElementById('settings-save-btn');
+    btn.disabled = true;
+    try {
+      await apiFetch('/api/settings', { method: 'POST', body: JSON.stringify({ ntfyUrl, notifications }) });
+      toast('Settings saved', 'success');
+      closeSettings();
+    } catch (err) {
+      toast(`Save failed: ${err.message}`, 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   function classifyLogLine(line) {
     const m = line.match(/^\[[^\]]+\]\s+(\S+)/);
     const event = m ? m[1] : '';
@@ -1886,7 +2021,19 @@
   document.getElementById('fsbrowse-cancel-btn').addEventListener('click', fsBrowseDismiss);
   document.getElementById('fsbrowse-close').addEventListener('click', fsBrowseDismiss);
 
+  // ── Settings modal wiring ────────────────────────────────────────────────────
+  document.getElementById('settings-btn').addEventListener('click', openSettings);
+  document.getElementById('settings-close').addEventListener('click', closeSettings);
+  document.getElementById('settings-cancel-btn').addEventListener('click', closeSettings);
+  document.getElementById('settings-save-btn').addEventListener('click', saveSettingsFromModal);
+  document.getElementById('global-dest').addEventListener('input', e => {
+    localStorage.setItem('megacmd-ui:dest', e.target.value);
+  });
+
   // ── Init ────────────────────────────────────────────────────────────────────
+  const savedDest = localStorage.getItem('megacmd-ui:dest');
+  if (savedDest) document.getElementById('global-dest').value = savedDest;
+
   checkStatus();
   loadTransfers();
   loadQueue();

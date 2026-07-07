@@ -29,14 +29,15 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 - **YouTube downloads** — paste a `youtube.com`/`youtu.be` URL to download the video as the highest-quality mp4 available, via `yt-dlp`
 - **YouTube playlist picker** — paste a playlist URL (one with a `list=` parameter) to open a picker listing every video in the playlist, so you can uncheck the ones you don't want before downloading. Kept videos are saved into a folder named after the playlist title, numbered in playlist order
 - **Playlist progress expand** — a downloading/finished playlist job can be expanded to see each video's individual status and progress (read-only — Cancel still stops the whole playlist job, since it's one `yt-dlp` process)
-- **Single shared destination** — one "Destination" field at the bottom of the page sets the save path for every downloader (MEGA, archive.org, direct, torrents, and YouTube), with a "Browse…" button to navigate server-side folders instead of typing a path
+- **Single shared destination** — one "Destination" field, in the Settings modal's General tab, sets the save path for every downloader (MEGA, archive.org, direct, torrents, and YouTube), with a "Browse…" button to navigate server-side folders instead of typing a path; remembered across reloads (browser `localStorage`)
+- **Settings modal** — the gear icon in the top-right corner opens a modal with a General tab (destination) and a Notifications tab (per-event on/off toggles and an ntfy endpoint override, saved server-side in `settings.json`)
 - **Collapsible sections** — each downloader panel can be collapsed via the arrow in its header to reduce clutter
 - **Color-coded activity log** — MEGA, Archive.org, Direct, Torrent, and YouTube events each get their own accent color in the log (MEGA and YouTube's section headings match too); a bolder/saturated version of the same color marks a completed download, failures are always red
 - **Stats bars** — each transfer table (MEGA, HTTP/Torrent, YouTube) shows a live summary (count by status, total size where known), with per-row and bulk pause/resume/cancel controls, auto-refreshing every 5 seconds
 - **Per-transfer controls** — pause, resume, or cancel individual transfers (MEGA and aria2); cancel or dismiss individual YouTube jobs
 - **Bulk controls** — pause all, resume all, cancel all (MEGA and aria2 tables)
 - **Activity log** — history of downloads, failures, and queue events (last 200 entries)
-- **ntfy push notifications** — queued/completed/failed MEGA downloads and queued/completed archive.org downloads send a push notification via [ntfy](https://ntfy.sh); best-effort, a failed ntfy call never affects downloads
+- **ntfy push notifications** — queued/completed/failed MEGA downloads and queued/completed archive.org downloads send a push notification via [ntfy](https://ntfy.sh); each event type can be toggled independently in Settings → Notifications, and the ntfy endpoint can be overridden there too (falls back to `NTFY_URL` otherwise); best-effort, a failed ntfy call never affects downloads
 - **Status bar** — shows MEGAcmd login status at a glance
 - **Dark theme** — mobile-friendly, no frameworks, no build step
 
@@ -123,13 +124,13 @@ cd /opt/docker/stack && docker compose up -d --build megacmd-ui
 | `MEGACMD_CONTAINER` | `megacmd` | Name of the MEGAcmd Docker container |
 | `PORT` | `8085` | Port the UI listens on |
 | `RETRY_INTERVAL_MIN` | `15` | Minutes between retry queue attempts for quota-exceeded downloads |
-| `DATA_DIR` | `/data` | Path inside the container for `queue.json` and `activity.log` |
+| `DATA_DIR` | `/data` | Path inside the container for `queue.json`, `activity.log`, and `settings.json` |
 | `ARIA2_RPC_URL` | `http://aria2:6800/jsonrpc` | URL of the aria2 JSON-RPC endpoint, used for archive.org, direct, and torrent downloads |
 | `ARIA2_RPC_SECRET` | *(empty)* | Shared secret for aria2 RPC auth — must match the `aria2` container's `RPC_SECRET` |
 | `YTDLP_BIN` | `yt-dlp` | Path/name of the `yt-dlp` binary to invoke for YouTube downloads |
 | `YTDLP_OUTPUT_DIR` | `/downloads/` | Directory `yt-dlp` writes finished videos to inside the container |
 | `FS_BROWSE_ROOT` | `/downloads` | Root directory the Destination "Browse…" folder picker is allowed to list; navigation can't escape above this path |
-| `NTFY_URL` | `http://ntfy:2586/ultraframe` | Full URL (including topic) of the [ntfy](https://ntfy.sh) endpoint to POST push notifications to |
+| `NTFY_URL` | `http://ntfy:2586/ultraframe` | Default full URL (including topic) of the [ntfy](https://ntfy.sh) endpoint to POST push notifications to; overridable per-instance in Settings → Notifications (stored in `settings.json`, takes precedence when set) |
 
 ## Troubleshooting
 
@@ -194,7 +195,7 @@ If either is missing, rebuild the image (`docker compose up -d --build megacmd-u
 
 ### ntfy notifications aren't arriving
 
-Notifications are best-effort — a failed or unreachable ntfy endpoint is logged to the console (`[NTFY] ...`) and never blocks a download. Confirm `NTFY_URL` points to a reachable topic URL (e.g. `curl -d "test" $NTFY_URL` from inside the `megacmd-ui` container) and that the `ntfy` service is on the same Docker network.
+Notifications are best-effort — a failed or unreachable ntfy endpoint is logged to the console (`[NTFY] ...`) and never blocks a download. Confirm the endpoint (Settings → Notifications, or `NTFY_URL` if left blank there) points to a reachable topic URL (e.g. `curl -d "test" $NTFY_URL` from inside the `megacmd-ui` container) and that the `ntfy` service is on the same Docker network. Also check that the relevant notification type isn't toggled off in Settings → Notifications.
 
 ### Destination "Browse…" button shows an error or empty list
 

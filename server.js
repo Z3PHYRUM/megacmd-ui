@@ -18,10 +18,11 @@ const RETRY_INTERVAL_MS  = (parseInt(process.env.RETRY_INTERVAL_MIN) || 15) * 60
 const DATA_DIR           = process.env.DATA_DIR || __dirname;
 const QUEUE_FILE         = path.join(DATA_DIR, 'queue.json');
 const LOG_FILE           = path.join(DATA_DIR, 'activity.log');
+const SETTINGS_FILE      = path.join(DATA_DIR, 'settings.json');
 const YTDLP_BIN          = process.env.YTDLP_BIN || 'yt-dlp';
 const YTDLP_OUTPUT_DIR   = process.env.YTDLP_OUTPUT_DIR || '/downloads/';
 const FS_BROWSE_ROOT     = process.env.FS_BROWSE_ROOT || '/downloads';
-const NTFY_URL           = process.env.NTFY_URL || 'http://ntfy:2586/ultraframe';
+const NTFY_URL_DEFAULT   = process.env.NTFY_URL || 'http://ntfy:2586/ultraframe';
 
 if (MOCK) console.log('[MOCK] Running in mock mode — no Docker commands will be executed');
 
@@ -39,12 +40,43 @@ function logActivity(event, link, detail) {
   console.log(`[LOG] ${line.trim()}`);
 }
 
+// ── Settings ─────────────────────────────────────────────────────────────────
+const DEFAULT_NOTIFICATIONS = {
+  mega_queued: true,
+  mega_completed: true,
+  mega_failed: true,
+  archive_queued: true,
+  archive_completed: true,
+};
+
+let settings = { ntfyUrl: '', notifications: { ...DEFAULT_NOTIFICATIONS } };
+
+function loadSettings() {
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      const loaded = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
+      settings = {
+        ntfyUrl: typeof loaded.ntfyUrl === 'string' ? loaded.ntfyUrl : '',
+        notifications: { ...DEFAULT_NOTIFICATIONS, ...(loaded.notifications || {}) },
+      };
+    }
+  } catch {}
+}
+
+function saveSettings() {
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2)); } catch {}
+}
+
+loadSettings();
+
 // ── ntfy notifications ────────────────────────────────────────────────────────
 // Fire-and-forget — a failed ntfy call must never affect download functionality.
-function notify(title, body, opts = {}) {
+function notify(type, title, body, opts = {}) {
+  if (settings.notifications[type] === false) return;
+  const url = settings.ntfyUrl.trim() || NTFY_URL_DEFAULT;
   const headers = { 'Content-Type': 'text/plain; charset=utf-8', 'Title': title };
   if (opts.priority) headers['Priority'] = opts.priority;
-  fetch(NTFY_URL, { method: 'POST', headers, body })
+  fetch(url, { method: 'POST', headers, body })
     .catch(err => console.error(`[NTFY] ${err.message}`));
 }
 
@@ -286,7 +318,7 @@ async function pollArchiveDownloads() {
     try {
       const status = await aria2Call('tellStatus', [gid, ['status']]);
       if (status.status === 'complete') {
-        notify('aria2c', `Download complete: ${filename}`);
+        notify('archive_completed', 'aria2c', `Download complete: ${filename}`);
         archiveDownloads.delete(gid);
       } else if (status.status === 'error' || status.status === 'removed') {
         archiveDownloads.delete(gid);
@@ -612,7 +644,7 @@ function addToQueue(links, dest, opts = {}) {
   saveQueue();
   items.forEach(i => {
     logActivity('QUEUED', i.link, i.dest);
-    if (!opts.silent) notify('MEGAcmd', `Queued: ${i.link}`);
+    if (!opts.silent) notify('mega_queued', 'MEGAcmd', `Queued: ${i.link}`);
   });
   if (!retryTimer) scheduleRetry();
   return items;
@@ -640,7 +672,7 @@ async function processRetryQueue() {
     try {
       await dockerExec('mega-get', ['--ignore-quota-warn', item.link, item.dest]);
       logActivity('DOWNLOADED', item.link, item.dest);
-      notify('MEGAcmd', `Download complete: ${item.link}`);
+      notify('mega_completed', 'MEGAcmd', `Download complete: ${item.link}`);
       retryQueue = retryQueue.filter(q => q.id !== item.id);
       saveQueue();
     } catch (err) {
@@ -654,7 +686,7 @@ async function processRetryQueue() {
         scheduleRetry();
         return;
       }
-      notify('MEGAcmd', `Download failed: ${item.link}`, { priority: 'high' });
+      notify('mega_failed', 'MEGAcmd', `Download failed: ${item.link}`, { priority: 'high' });
     }
   }
 
@@ -686,16 +718,16 @@ app.post('/api/download', async (req, res) => {
   for (const rawLink of links) {
     const link = typeof rawLink === 'string' ? rawLink.trim() : '';
     if (!link) continue;
-    notify('MEGAcmd', `Queued: ${link}`);
+    notify('mega_queued', 'MEGAcmd', `Queued: ${link}`);
     try {
       await dockerExec('mega-get', ['--ignore-quota-warn', link, destination]);
       logActivity('DOWNLOADED', link, destination);
-      notify('MEGAcmd', `Download complete: ${link}`);
+      notify('mega_completed', 'MEGAcmd', `Download complete: ${link}`);
       results.push({ link, success: true });
     } catch (err) {
       const error = cleanMegaError(err.message);
       const quotaExceeded = /bandwidth quota/i.test(err.message);
-      if (!quotaExceeded) notify('MEGAcmd', `Download failed: ${link}`, { priority: 'high' });
+      if (!quotaExceeded) notify('mega_failed', 'MEGAcmd', `Download failed: ${link}`, { priority: 'high' });
       results.push({ link, success: false, error, quotaExceeded });
     }
   }
@@ -891,7 +923,7 @@ app.post('/api/archive/confirm', async (req, res) => {
     try {
       const gid = await aria2AddUri(url, name, destination);
       logActivity('ARCHIVE_QUEUED', name, identifier);
-      notify('aria2c', `Queued: ${name}`);
+      notify('archive_queued', 'aria2c', `Queued: ${name}`);
       archiveDownloads.set(gid, name);
       results.push({ name, success: true, gid });
     } catch (err) {
@@ -1094,6 +1126,23 @@ app.get('/api/log', (req, res) => {
 app.delete('/api/log', (req, res) => {
   try { fs.writeFileSync(LOG_FILE, ''); res.json({ success: true }); }
   catch (err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// ── Settings routes ───────────────────────────────────────────────────────────
+app.get('/api/settings', (req, res) => {
+  res.json({ ntfyUrl: settings.ntfyUrl, ntfyUrlDefault: NTFY_URL_DEFAULT, notifications: settings.notifications });
+});
+
+app.post('/api/settings', (req, res) => {
+  const { ntfyUrl, notifications } = req.body;
+  if (typeof ntfyUrl === 'string') settings.ntfyUrl = ntfyUrl.trim();
+  if (notifications && typeof notifications === 'object') {
+    for (const key of Object.keys(DEFAULT_NOTIFICATIONS)) {
+      if (key in notifications) settings.notifications[key] = !!notifications[key];
+    }
+  }
+  saveSettings();
+  res.json({ ntfyUrl: settings.ntfyUrl, ntfyUrlDefault: NTFY_URL_DEFAULT, notifications: settings.notifications });
 });
 
 app.listen(PORT, () => {
