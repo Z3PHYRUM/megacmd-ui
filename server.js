@@ -21,6 +21,7 @@ const LOG_FILE           = path.join(DATA_DIR, 'activity.log');
 const YTDLP_BIN          = process.env.YTDLP_BIN || 'yt-dlp';
 const YTDLP_OUTPUT_DIR   = process.env.YTDLP_OUTPUT_DIR || '/downloads/';
 const FS_BROWSE_ROOT     = process.env.FS_BROWSE_ROOT || '/downloads';
+const NTFY_URL           = process.env.NTFY_URL || 'http://ntfy:2586/ultraframe';
 
 if (MOCK) console.log('[MOCK] Running in mock mode — no Docker commands will be executed');
 
@@ -36,6 +37,15 @@ function logActivity(event, link, detail) {
   const line = `[${ts}] ${event.padEnd(12)} ${link}${detail_str}\n`;
   try { fs.appendFileSync(LOG_FILE, line); } catch {}
   console.log(`[LOG] ${line.trim()}`);
+}
+
+// ── ntfy notifications ────────────────────────────────────────────────────────
+// Fire-and-forget — a failed ntfy call must never affect download functionality.
+function notify(title, body, opts = {}) {
+  const headers = { 'Content-Type': 'text/plain; charset=utf-8', 'Title': title };
+  if (opts.priority) headers['Priority'] = opts.priority;
+  fetch(NTFY_URL, { method: 'POST', headers, body })
+    .catch(err => console.error(`[NTFY] ${err.message}`));
 }
 
 // ── Mock state ───────────────────────────────────────────────────────────────
@@ -265,6 +275,28 @@ async function fetchArchiveMetadata(identifier) {
     throw new Error('No files found for this archive.org item');
   return data;
 }
+
+// aria2 downloads run async with no completion callback, so poll queued gids
+// to fire the "download complete" notification once each finishes.
+const archiveDownloads = new Map(); // gid -> filename
+const ARCHIVE_POLL_MS = 10000;
+
+async function pollArchiveDownloads() {
+  for (const [gid, filename] of archiveDownloads) {
+    try {
+      const status = await aria2Call('tellStatus', [gid, ['status']]);
+      if (status.status === 'complete') {
+        notify('aria2c', `Download complete: ${filename}`);
+        archiveDownloads.delete(gid);
+      } else if (status.status === 'error' || status.status === 'removed') {
+        archiveDownloads.delete(gid);
+      }
+    } catch {
+      archiveDownloads.delete(gid);
+    }
+  }
+}
+setInterval(pollArchiveDownloads, ARCHIVE_POLL_MS);
 
 // ── YouTube (yt-dlp) ──────────────────────────────────────────────────────────
 const YOUTUBE_URL_RE = /^https?:\/\/(www\.|m\.)?(youtube\.com|youtu\.be)\//i;
@@ -570,7 +602,7 @@ function queueId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2);
 }
 
-function addToQueue(links, dest) {
+function addToQueue(links, dest, opts = {}) {
   const items = links.map(link => ({
     id: queueId(), link, dest,
     addedAt: new Date().toISOString(),
@@ -578,7 +610,10 @@ function addToQueue(links, dest) {
   }));
   retryQueue.push(...items);
   saveQueue();
-  items.forEach(i => logActivity('QUEUED', i.link, i.dest));
+  items.forEach(i => {
+    logActivity('QUEUED', i.link, i.dest);
+    if (!opts.silent) notify('MEGAcmd', `Queued: ${i.link}`);
+  });
   if (!retryTimer) scheduleRetry();
   return items;
 }
@@ -605,6 +640,7 @@ async function processRetryQueue() {
     try {
       await dockerExec('mega-get', ['--ignore-quota-warn', item.link, item.dest]);
       logActivity('DOWNLOADED', item.link, item.dest);
+      notify('MEGAcmd', `Download complete: ${item.link}`);
       retryQueue = retryQueue.filter(q => q.id !== item.id);
       saveQueue();
     } catch (err) {
@@ -618,6 +654,7 @@ async function processRetryQueue() {
         scheduleRetry();
         return;
       }
+      notify('MEGAcmd', `Download failed: ${item.link}`, { priority: 'high' });
     }
   }
 
@@ -649,20 +686,23 @@ app.post('/api/download', async (req, res) => {
   for (const rawLink of links) {
     const link = typeof rawLink === 'string' ? rawLink.trim() : '';
     if (!link) continue;
+    notify('MEGAcmd', `Queued: ${link}`);
     try {
       await dockerExec('mega-get', ['--ignore-quota-warn', link, destination]);
       logActivity('DOWNLOADED', link, destination);
+      notify('MEGAcmd', `Download complete: ${link}`);
       results.push({ link, success: true });
     } catch (err) {
       const error = cleanMegaError(err.message);
       const quotaExceeded = /bandwidth quota/i.test(err.message);
+      if (!quotaExceeded) notify('MEGAcmd', `Download failed: ${link}`, { priority: 'high' });
       results.push({ link, success: false, error, quotaExceeded });
     }
   }
 
   // Auto-add quota-blocked links to the retry queue
   const quotaLinks = results.filter(r => r.quotaExceeded).map(r => r.link);
-  if (quotaLinks.length) addToQueue(quotaLinks, destination);
+  if (quotaLinks.length) addToQueue(quotaLinks, destination, { silent: true });
 
   res.json({ results });
 });
@@ -851,6 +891,8 @@ app.post('/api/archive/confirm', async (req, res) => {
     try {
       const gid = await aria2AddUri(url, name, destination);
       logActivity('ARCHIVE_QUEUED', name, identifier);
+      notify('aria2c', `Queued: ${name}`);
+      archiveDownloads.set(gid, name);
       results.push({ name, success: true, gid });
     } catch (err) {
       logActivity('ARCHIVE_FAILED', name, err.message);

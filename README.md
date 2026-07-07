@@ -36,6 +36,7 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 - **Per-transfer controls** — pause, resume, or cancel individual transfers (MEGA and aria2); cancel or dismiss individual YouTube jobs
 - **Bulk controls** — pause all, resume all, cancel all (MEGA and aria2 tables)
 - **Activity log** — history of downloads, failures, and queue events (last 200 entries)
+- **ntfy push notifications** — queued/completed/failed MEGA downloads and queued/completed archive.org downloads send a push notification via [ntfy](https://ntfy.sh); best-effort, a failed ntfy call never affects downloads
 - **Status bar** — shows MEGAcmd login status at a glance
 - **Dark theme** — mobile-friendly, no frameworks, no build step
 
@@ -72,6 +73,7 @@ git clone https://github.com/Z3PHYRUM/megacmd-ui.git /opt/docker/megacmd-ui
       - PORT=8085
       - ARIA2_RPC_URL=http://aria2:6800/jsonrpc
       - ARIA2_RPC_SECRET=${ARIA2_RPC_SECRET}
+      - NTFY_URL=http://ntfy:2586/ultraframe
 
   aria2:
     image: p3terx/aria2-pro
@@ -127,6 +129,7 @@ cd /opt/docker/stack && docker compose up -d --build megacmd-ui
 | `YTDLP_BIN` | `yt-dlp` | Path/name of the `yt-dlp` binary to invoke for YouTube downloads |
 | `YTDLP_OUTPUT_DIR` | `/downloads/` | Directory `yt-dlp` writes finished videos to inside the container |
 | `FS_BROWSE_ROOT` | `/downloads` | Root directory the Destination "Browse…" folder picker is allowed to list; navigation can't escape above this path |
+| `NTFY_URL` | `http://ntfy:2586/ultraframe` | Full URL (including topic) of the [ntfy](https://ntfy.sh) endpoint to POST push notifications to |
 
 ## Troubleshooting
 
@@ -188,6 +191,10 @@ docker exec megacmd-ui ffmpeg -version
 ```
 
 If either is missing, rebuild the image (`docker compose up -d --build megacmd-ui`) — they're installed in the `Dockerfile` and won't appear after a plain restart. YouTube frequently changes its site in ways that break older `yt-dlp` releases; if downloads that used to work start failing, rebuilding to pick up a newer `yt-dlp` from PyPI is usually the fix.
+
+### ntfy notifications aren't arriving
+
+Notifications are best-effort — a failed or unreachable ntfy endpoint is logged to the console (`[NTFY] ...`) and never blocks a download. Confirm `NTFY_URL` points to a reachable topic URL (e.g. `curl -d "test" $NTFY_URL` from inside the `megacmd-ui` container) and that the `ntfy` service is on the same Docker network.
 
 ### Destination "Browse…" button shows an error or empty list
 

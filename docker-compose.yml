@@ -12,6 +12,7 @@ services:
       - MEGACMD_CONTAINER=megacmd
       - ARIA2_RPC_URL=http://aria2:6800/jsonrpc
       - ARIA2_RPC_SECRET=${ARIA2_RPC_SECRET}
+      - NTFY_URL=http://ntfy:2586/ultraframe
     restart: unless-stopped
 
   aria2:
