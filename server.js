@@ -13,7 +13,12 @@ const app = express();
 const PORT               = process.env.PORT || 8085;
 const MEGACMD_CONTAINER  = process.env.MEGACMD_CONTAINER || 'megacmd';
 const MOCK               = process.env.MOCK === '1';
-const TRANSFER_LIMIT     = 1000;
+const TRANSFER_LIMIT     = 1000;  // display cap for the main transfer table (UI-facing)
+const TRANSFER_SAFETY_LIMIT = 5000; // used anywhere cleanup/discovery logic must see everything —
+                                     // a lower cap here would mean folder-picker discovery and
+                                     // straggler cancellation silently can't see or touch transfers
+                                     // past the cutoff, which was the actual cause of large folders
+                                     // still resuming everything beyond the display limit
 const RETRY_INTERVAL_MS  = (parseInt(process.env.RETRY_INTERVAL_MIN) || 15) * 60 * 1000;
 const DATA_DIR           = process.env.DATA_DIR || __dirname;
 const QUEUE_FILE         = path.join(DATA_DIR, 'queue.json');
@@ -146,7 +151,10 @@ function dockerExec(megaCommand, args = []) {
       const link = args[3] || '';
       const destination = args[4] || '/downloads/';
       const prefix = destination.endsWith('/') ? destination : destination + '/';
-      const fileCount = /\/folder\//i.test(link) ? 4 : 1;
+      // "bigfolder" in the link simulates a folder with more files than
+      // TRANSFER_LIMIT, for testing that discovery/cleanup logic doesn't
+      // silently stop working past the display cap.
+      const fileCount = /bigfolder/i.test(link) ? 1200 : /\/folder\//i.test(link) ? 4 : 1;
       for (let i = 0; i < fileCount; i++) {
         mockTransfers.push({
           tag: String(Date.now() + i).slice(-6),
@@ -275,7 +283,7 @@ async function sweepPostConfirmWatches() {
   if (!postConfirmWatches.length) return;
 
   try {
-    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
+    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
     const transfers = parseTransfers(raw);
     for (const watch of postConfirmWatches) {
       const prefix = watch.destination.endsWith('/') ? watch.destination : watch.destination + '/';
@@ -283,7 +291,7 @@ async function sweepPostConfirmWatches() {
         .filter(t => t.tag && t.filename?.startsWith(prefix) && !watch.keepTags.has(t.tag))
         .map(t => t.tag);
       if (stragglerTags.length) {
-        await runInBatches(stragglerTags, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
+        await cancelTagsReliably(stragglerTags);
       }
     }
   } catch {}
@@ -299,6 +307,25 @@ async function runInBatches(items, fn, batchSize = 15) {
   for (let i = 0; i < items.length; i += batchSize) {
     await Promise.all(items.slice(i, i + batchSize).map(fn));
   }
+}
+
+// Cancels a batch of tags and verifies they actually disappeared, retrying
+// once for any that are still present -- a single fire-and-forget batch
+// wasn't reliable enough in practice for very large batches (confirmed live:
+// ~999 explicitly-cancelled tags out of 1000 didn't actually cancel on the
+// first pass and ended up resumed/retrying instead).
+async function cancelTagsReliably(tags) {
+  if (!tags.length) return;
+  await runInBatches(tags, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
+  try {
+    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
+    const stillPresent = new Set(parseTransfers(raw).map(t => t.tag));
+    const remaining = tags.filter(t => stillPresent.has(t));
+    if (remaining.length) {
+      console.log(`[BROWSE] ${remaining.length}/${tags.length} cancel(s) needed a retry`);
+      await runInBatches(remaining, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
+    }
+  } catch {}
 }
 
 // Adds a magnet link and waits for aria2 to resolve its BitTorrent metadata
@@ -795,7 +822,7 @@ async function checkAllQueuesFinished() {
 
   if (!busy) {
     try {
-      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
+      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
       if (parseTransfers(raw).some(t => !['complete', 'error'].includes(t.status))) busy = true;
     } catch {}
   }
@@ -974,7 +1001,7 @@ app.post('/api/browse', async (req, res) => {
   // Snapshot existing tags so we can identify what mega-get adds
   let existingTags = new Set();
   try {
-    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
+    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
     parseTransfers(raw).forEach(t => { if (t.tag) existingTags.add(t.tag); });
   } catch {}
 
@@ -998,13 +1025,16 @@ app.post('/api/browse', async (req, res) => {
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 700));
     try {
-      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
+      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
       const fresh = parseTransfers(raw).filter(t => t.tag && !existingTags.has(t.tag));
-      for (const t of fresh) {
-        if (!pausedTags.has(t.tag)) {
-          pausedTags.add(t.tag);
-          dockerExec('mega-transfers', ['-p', t.tag]).catch(() => {});
-        }
+      const newlyFound = fresh.filter(t => !pausedTags.has(t.tag));
+      newlyFound.forEach(t => pausedTags.add(t.tag));
+      if (newlyFound.length) {
+        // Fire-and-forget so a big batch doesn't delay the next poll tick, but
+        // bounded concurrency (not one unbounded burst per tick) so a folder
+        // discovering hundreds of files at once doesn't overwhelm docker exec
+        // and silently drop some pause commands.
+        runInBatches(newlyFound.map(t => t.tag), tag => dockerExec('mega-transfers', ['-p', tag]).catch(() => {})).catch(() => {});
       }
       if (fresh.length > 0 && fresh.length === prevCount) { newTransfers = fresh; break; }
       prevCount = fresh.length;
@@ -1036,7 +1066,7 @@ app.post('/api/browse/confirm', async (req, res) => {
   const session = browseId && browseSessions.get(browseId);
   if (session) {
     try {
-      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
+      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
       const prefix = session.destination.endsWith('/') ? session.destination : session.destination + '/';
       const stragglers = parseTransfers(raw)
         .filter(t => t.tag && t.filename?.startsWith(prefix))
@@ -1047,7 +1077,7 @@ app.post('/api/browse/confirm', async (req, res) => {
     browseSessions.delete(browseId);
   }
 
-  await runInBatches(cancelTags, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
+  await cancelTagsReliably(cancelTags);
   // Resume only the specific kept tags -- deliberately never a blanket "-r -a"
   // here (see postConfirmWatches comment: that was the actual cause of the
   // over-download bug, not just an incomplete straggler sweep).
