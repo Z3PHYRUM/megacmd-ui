@@ -19,6 +19,7 @@ const DATA_DIR           = process.env.DATA_DIR || __dirname;
 const QUEUE_FILE         = path.join(DATA_DIR, 'queue.json');
 const LOG_FILE           = path.join(DATA_DIR, 'activity.log');
 const SETTINGS_FILE      = path.join(DATA_DIR, 'settings.json');
+const BOOKMARKS_FILE     = path.join(DATA_DIR, 'bookmarks.json');
 const YTDLP_BIN          = process.env.YTDLP_BIN || 'yt-dlp';
 const YTDLP_OUTPUT_DIR   = process.env.YTDLP_OUTPUT_DIR || '/downloads/';
 const FS_BROWSE_ROOT     = process.env.FS_BROWSE_ROOT || '/downloads';
@@ -138,6 +139,24 @@ function dockerExec(megaCommand, args = []) {
       }
       return Promise.resolve(mockTransfersOutput());
     }
+    // Simulates /api/browse's backgrounded "mega-get ... &" folder-discovery trick
+    // (args: -c, script, sh, link, destination) so the folder picker is testable
+    // without a real MEGAcmd container.
+    if (megaCommand === '/bin/sh' && (args[1] || '').startsWith('mega-get')) {
+      const link = args[3] || '';
+      const destination = args[4] || '/downloads/';
+      const prefix = destination.endsWith('/') ? destination : destination + '/';
+      const fileCount = /\/folder\//i.test(link) ? 4 : 1;
+      for (let i = 0; i < fileCount; i++) {
+        mockTransfers.push({
+          tag: String(Date.now() + i).slice(-6),
+          type: '⇓',
+          filename: `${prefix}mock-folder/file-${i + 1}.bin`,
+          transferred: '0 B', total: `${(i + 1) * 10} MB`, speed: '0 B/s', progress: '0 %', state: 'queued',
+        });
+      }
+      return Promise.resolve('');
+    }
     return Promise.resolve('');
   }
 
@@ -214,7 +233,17 @@ async function aria2AddUri(url, displayName, dir) {
 
 const TORRENT_METADATA_TIMEOUT_MS = 30000;
 const TORRENT_METADATA_POLL_MS    = 700;
+const BROWSE_DISCOVERY_TIMEOUT_MS = 20000;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Runs fn over items in fixed-size concurrent batches instead of one-at-a-time,
+// so confirming/cancelling a folder with hundreds of files doesn't take one
+// docker exec round-trip per file, serially.
+async function runInBatches(items, fn, batchSize = 15) {
+  for (let i = 0; i < items.length; i += batchSize) {
+    await Promise.all(items.slice(i, i + batchSize).map(fn));
+  }
+}
 
 // Adds a magnet link and waits for aria2 to resolve its BitTorrent metadata
 // (file list), pausing the download once resolved so the caller can present
@@ -726,6 +755,21 @@ async function checkAllQueuesFinished() {
 }
 setInterval(checkAllQueuesFinished, ALL_FINISHED_POLL_MS);
 
+// ── Bookmarks ────────────────────────────────────────────────────────────────
+let bookmarks = [];
+
+function loadBookmarks() {
+  try {
+    if (fs.existsSync(BOOKMARKS_FILE)) bookmarks = JSON.parse(fs.readFileSync(BOOKMARKS_FILE, 'utf8'));
+  } catch { bookmarks = []; }
+}
+
+function saveBookmarks() {
+  try { fs.writeFileSync(BOOKMARKS_FILE, JSON.stringify(bookmarks, null, 2)); } catch {}
+}
+
+loadBookmarks();
+
 // ── API routes ────────────────────────────────────────────────────────────────
 app.get('/api/status', async (req, res) => {
   try {
@@ -877,6 +921,13 @@ app.post('/api/browse', async (req, res) => {
     parseTransfers(raw).forEach(t => { if (t.tag) existingTags.add(t.tag); });
   } catch {}
 
+  // Pause globally *before* discovery starts so newly-created transfers come in
+  // already paused. Belt-and-suspenders with the per-tag pause below, in case
+  // the global pause doesn't retroactively cover transfers MEGAcmd hasn't
+  // created yet — important for folders with hundreds of subfolders, where we
+  // don't want any bytes moving before the picker's OK is clicked.
+  try { await dockerExec('mega-transfers', ['-p', '-a']); } catch {}
+
   // Background mega-get so it returns immediately after telling the daemon to queue the folder.
   // $1/$2 positional params avoid shell injection.
   try {
@@ -885,14 +936,22 @@ app.post('/api/browse', async (req, res) => {
     return res.status(500).json({ error: cleanMegaError(err.message) });
   }
 
-  // Poll until the transfer count stabilises (no new entries for two consecutive polls) or 8 s elapses
+  // Poll until the transfer count stabilises (no new entries for two consecutive polls) or the
+  // deadline elapses, pausing each newly-discovered transfer immediately as a safety net.
   let newTransfers = [], prevCount = -1;
-  const deadline = Date.now() + 8000;
+  const pausedTags = new Set();
+  const deadline = Date.now() + BROWSE_DISCOVERY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 700));
     try {
       const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
       const fresh = parseTransfers(raw).filter(t => t.tag && !existingTags.has(t.tag));
+      for (const t of fresh) {
+        if (!pausedTags.has(t.tag)) {
+          pausedTags.add(t.tag);
+          dockerExec('mega-transfers', ['-p', t.tag]).catch(() => {});
+        }
+      }
       if (fresh.length > 0 && fresh.length === prevCount) { newTransfers = fresh; break; }
       prevCount = fresh.length;
       newTransfers = fresh;
@@ -902,24 +961,57 @@ app.post('/api/browse', async (req, res) => {
   if (!newTransfers.length)
     return res.status(500).json({ error: 'No files found — quota exceeded, link invalid, or folder is empty' });
 
-  // Pause each new transfer so nothing downloads before the user confirms
-  for (const t of newTransfers)
-    try { await dockerExec('mega-transfers', ['-p', t.tag]); } catch {}
-
   logActivity('BROWSE', link, `${newTransfers.length} file(s) found`);
   res.json({ files: newTransfers, dest: destination });
 });
 
 app.post('/api/browse/confirm', async (req, res) => {
-  const { keep = [], cancel = [] } = req.body;
-  for (const tag of cancel)
-    try { await dockerExec('mega-transfers', ['-c', String(tag)]); } catch {}
-  for (const tag of keep)
-    try { await dockerExec('mega-transfers', ['-r', String(tag)]); } catch {}
+  const { keep = [], cancel = [], bookmarkId, keptFiles = [] } = req.body;
+  await runInBatches(cancel, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
+  await runInBatches(keep, tag => dockerExec('mega-transfers', ['-r', String(tag)]).catch(() => {}));
   // Clear any global pause so selected transfers actually start
   if (keep.length) try { await dockerExec('mega-transfers', ['-r', '-a']); } catch {}
   if (keep.length) logActivity('DOWNLOADED', `${keep.length} file(s) selected from folder`, `${cancel.length} skipped`);
+
+  if (bookmarkId && keptFiles.length) {
+    const bookmark = bookmarks.find(b => b.id === bookmarkId);
+    if (bookmark) {
+      bookmark.downloaded = [...new Set([...bookmark.downloaded, ...keptFiles])];
+      saveBookmarks();
+    }
+  }
+
   res.json({ success: true });
+});
+
+// ── Bookmark routes ───────────────────────────────────────────────────────────
+app.get('/api/bookmarks', (req, res) => {
+  res.json({ bookmarks });
+});
+
+app.post('/api/bookmarks', (req, res) => {
+  const { link, dest } = req.body;
+  if (typeof link !== 'string' || !link.trim())
+    return res.status(400).json({ error: 'No link provided' });
+  const existing = bookmarks.find(b => b.link === link.trim());
+  if (existing) return res.json({ bookmark: existing });
+  const bookmark = {
+    id: queueId(),
+    link: link.trim(),
+    dest: resolveDest(dest),
+    addedAt: new Date().toISOString(),
+    downloaded: [],
+  };
+  bookmarks.push(bookmark);
+  saveBookmarks();
+  res.json({ bookmark });
+});
+
+app.delete('/api/bookmarks/:id', (req, res) => {
+  const before = bookmarks.length;
+  bookmarks = bookmarks.filter(b => b.id !== req.params.id);
+  saveBookmarks();
+  res.json({ success: bookmarks.length < before });
 });
 
 // ── Archive.org routes ────────────────────────────────────────────────────────

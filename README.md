@@ -21,7 +21,8 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 
 - **MEGA downloads** — paste one or more Mega links and queue them all at once; its own transfer table (progress/speed/size) is built into the same panel
 - **Base64 link decoding** — pasted links that turn out to be base64-encoded are transparently decoded; a decoded MEGA link is queued automatically, anything else is surfaced in a "Needs Attention" panel instead of silently failing
-- **Folder file picker** — for `mega.nz/folder/` links, browse contents and select individual files before downloading
+- **Folder file picker** — for `mega.nz/folder/` links, browse contents and select individual files before downloading; nothing transfers before you click "Download Selected" (MEGAcmd's transfer queue is globally paused before discovery even starts)
+- **Folder bookmarks** — star a folder from the file picker (yellow when bookmarked) to save it for revisiting later; a "★" button in the MEGA Downloads header lists bookmarked folders and re-opens the picker for one. Files already downloaded from a bookmarked folder are flagged "Downloaded" and start unchecked next time, so you can pull a huge folder down a few files at a time without re-picking the same ones
 - **Bandwidth quota handling** — quota-exceeded downloads are automatically added to a retry queue and retried every 15 minutes
 - **HTTP and Torrent Downloads section** — archive.org, direct HTTP(S), and magnet/torrent downloads all live in one panel since they share the same aria2 queue: an `archive.org` URL box (opens a file picker) and a paste box for direct URLs or magnet links (either box can be used independently), one shared transfer table below both
 - **Archive.org downloads** — paste an `archive.org` item URL (either in that section or directly into the MEGA download queue), pick which files you want from a file picker, and queue them as downloads via aria2c
@@ -124,7 +125,7 @@ cd /opt/docker/stack && docker compose up -d --build megacmd-ui
 | `MEGACMD_CONTAINER` | `megacmd` | Name of the MEGAcmd Docker container |
 | `PORT` | `8085` | Port the UI listens on |
 | `RETRY_INTERVAL_MIN` | `15` | Minutes between retry queue attempts for quota-exceeded downloads |
-| `DATA_DIR` | `/data` | Path inside the container for `queue.json`, `activity.log`, and `settings.json` |
+| `DATA_DIR` | `/data` | Path inside the container for `queue.json`, `activity.log`, `settings.json`, and `bookmarks.json` |
 | `ARIA2_RPC_URL` | `http://aria2:6800/jsonrpc` | URL of the aria2 JSON-RPC endpoint, used for archive.org, direct, and torrent downloads |
 | `ARIA2_RPC_SECRET` | *(empty)* | Shared secret for aria2 RPC auth — must match the `aria2` container's `RPC_SECRET` |
 | `YTDLP_BIN` | `yt-dlp` | Path/name of the `yt-dlp` binary to invoke for YouTube downloads |
@@ -154,6 +155,10 @@ docker exec megacmd mega-transfers --limit=5 --col-separator=|
 ```
 
 The parser reads the header row dynamically, so as long as the columns include TAG, TYPE, FILENAME, TRANSFERRED, TOTAL, SPEED, PROGRESS, and STATE (in any order), it will work. If column names differ between versions, the header line from the above command will show exactly what names are in use.
+
+### Folder picker is slow or incomplete for very large folders
+
+The folder file picker currently still has to ask MEGAcmd to actually enqueue the folder's contents to discover what's inside (it globally pauses transfers first so nothing downloads before you confirm, but MEGAcmd still has to enumerate every file). For folders with hundreds of subfolders, discovery can take a while, and the picker gives up waiting after 20 seconds — if that happens, the file list may be incomplete. A future version may switch to a pure listing command (`mega-ls`) that doesn't touch the transfer queue at all, which would remove this limitation; that's not implemented yet.
 
 ### MEGAcmd shows "not logged in"
 

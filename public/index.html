@@ -326,6 +326,12 @@
     /* ── Settings modal ── */
     #settings-btn { margin-left: auto; font-size: 17px; }
 
+    /* ── Bookmarks ── */
+    .star-btn { font-size: 16px; }
+    .star-btn.starred          { color: #ffd700; }
+    .star-btn.starred:hover    { color: #ffd700; opacity: 0.85; }
+    tr.browse-row-downloaded td { opacity: 0.55; }
+
     .settings-tabs {
       display: flex;
       gap: 4px;
@@ -502,7 +508,10 @@
 <div id="browse-overlay" class="browse-overlay hidden">
   <div class="browse-modal">
     <div class="browse-header">
-      <span>Select Files to Download</span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span>Select Files to Download</span>
+        <button class="icon star-btn" id="browse-bookmark-btn" title="Bookmark this folder">☆</button>
+      </div>
       <button class="icon" id="browse-close" title="Cancel">✕</button>
     </div>
     <div class="browse-body">
@@ -724,12 +733,35 @@
   </div>
 </div>
 
+<!-- Bookmarks modal -->
+<div id="bookmarks-overlay" class="browse-overlay hidden">
+  <div class="browse-modal" style="max-width:640px">
+    <div class="browse-header">
+      <span>Bookmarked Folders</span>
+      <button class="icon" id="bookmarks-close" title="Close">✕</button>
+    </div>
+    <div class="browse-body">
+      <div class="browse-file-wrap table-wrap">
+        <table>
+          <thead>
+            <tr><th>Link</th><th>Downloaded</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="bookmarks-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 <main>
   <!-- Download Queue (MEGA) -->
   <section class="panel">
     <div class="panel-header">
       <h2 class="h-mega">MEGA Downloads</h2>
-      <button class="collapse-btn" id="mega-toggle" onclick="toggleCollapse('mega-body','mega-toggle')" title="Collapse">▾</button>
+      <div style="display:flex;align-items:center;gap:10px">
+        <button class="icon star-btn starred" id="bookmarks-btn" title="Bookmarked folders">★</button>
+        <button class="collapse-btn" id="mega-toggle" onclick="toggleCollapse('mega-body','mega-toggle')" title="Collapse">▾</button>
+      </div>
     </div>
     <div id="mega-body">
       <textarea
@@ -1112,7 +1144,14 @@
   }
 
   // ── Folder picker ───────────────────────────────────────────────────────────
+  let currentBrowseLink = null, currentBrowseDest = null, currentBookmark = null;
+
   function openFolderPicker(link, dest) {
+    currentBrowseLink = link;
+    currentBrowseDest = dest;
+    currentBookmark = findBookmarkByLink(link);
+    updateBookmarkStar();
+
     const overlay = document.getElementById('browse-overlay');
     overlay.classList.remove('hidden');
     document.getElementById('browse-loading').style.display = 'block';
@@ -1138,13 +1177,16 @@
 
   function renderBrowseFiles(files, dest) {
     const prefix = dest.endsWith('/') ? dest : dest + '/';
+    const downloaded = new Set(currentBookmark?.downloaded || []);
     document.getElementById('browse-tbody').innerHTML = files.map(f => {
       const rel = f.filename.startsWith(prefix) ? f.filename.slice(prefix.length) : f.filename;
-      return `<tr>
+      const isDownloaded = downloaded.has(rel);
+      const badge = isDownloaded ? ' <span class="badge complete" style="margin-left:6px">Downloaded</span>' : '';
+      return `<tr class="${isDownloaded ? 'browse-row-downloaded' : ''}">
         <td style="padding:7px 6px 7px 11px">
-          <input type="checkbox" class="browse-cb" data-tag="${esc(f.tag)}" checked>
+          <input type="checkbox" class="browse-cb" data-tag="${esc(f.tag)}" data-rel="${esc(rel)}" ${isDownloaded ? '' : 'checked'}>
         </td>
-        <td class="filename-cell" title="${esc(f.filename)}">${esc(rel)}</td>
+        <td class="filename-cell" title="${esc(f.filename)}">${esc(rel)}${badge}</td>
         <td style="color:var(--muted);white-space:nowrap;font-size:12px">${esc(f.total || '—')}</td>
       </tr>`;
     }).join('');
@@ -1164,15 +1206,22 @@
   }
 
   async function browseConfirm() {
-    const keep = [], cancel = [];
-    document.querySelectorAll('.browse-cb').forEach(cb =>
-      (cb.checked ? keep : cancel).push(cb.dataset.tag)
-    );
+    const keep = [], cancel = [], keptFiles = [];
+    document.querySelectorAll('.browse-cb').forEach(cb => {
+      if (cb.checked) { keep.push(cb.dataset.tag); keptFiles.push(cb.dataset.rel); }
+      else cancel.push(cb.dataset.tag);
+    });
     const btn = document.getElementById('browse-confirm-btn');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>Starting…';
     try {
-      await apiFetch('/api/browse/confirm', { method: 'POST', body: JSON.stringify({ keep, cancel }) });
+      await apiFetch('/api/browse/confirm', {
+        method: 'POST',
+        body: JSON.stringify({ keep, cancel, bookmarkId: currentBookmark?.id, keptFiles }),
+      });
+      if (currentBookmark) {
+        currentBookmark.downloaded = [...new Set([...currentBookmark.downloaded, ...keptFiles])];
+      }
       document.getElementById('browse-overlay').classList.add('hidden');
       document.getElementById('links').value = '';
       toast(`Started ${keep.length} download${keep.length !== 1 ? 's' : ''}`, 'success');
@@ -1191,6 +1240,94 @@
       await apiFetch('/api/browse/confirm', { method: 'POST', body: JSON.stringify({ keep: [], cancel: tags }) }).catch(() => {});
     document.getElementById('browse-overlay').classList.add('hidden');
   }
+
+  // ── Bookmarks ─────────────────────────────────────────────────────────────────
+  let bookmarksList = [];
+
+  async function loadBookmarksList() {
+    try {
+      const { bookmarks } = await apiFetch('/api/bookmarks');
+      bookmarksList = bookmarks;
+      document.getElementById('bookmarks-btn').title = `Bookmarked folders (${bookmarksList.length})`;
+    } catch {}
+  }
+
+  function findBookmarkByLink(link) {
+    return bookmarksList.find(b => b.link === link) || null;
+  }
+
+  function updateBookmarkStar() {
+    const btn = document.getElementById('browse-bookmark-btn');
+    const starred = !!currentBookmark;
+    btn.textContent = starred ? '★' : '☆';
+    btn.classList.toggle('starred', starred);
+    btn.title = starred ? 'Remove bookmark' : 'Bookmark this folder';
+  }
+
+  async function toggleBookmarkStar() {
+    if (currentBookmark) {
+      const id = currentBookmark.id;
+      await apiFetch(`/api/bookmarks/${id}`, { method: 'DELETE' }).catch(() => {});
+      bookmarksList = bookmarksList.filter(b => b.id !== id);
+      currentBookmark = null;
+      toast('Bookmark removed', 'success');
+    } else {
+      try {
+        const { bookmark } = await apiFetch('/api/bookmarks', {
+          method: 'POST', body: JSON.stringify({ link: currentBrowseLink, dest: currentBrowseDest }),
+        });
+        bookmarksList.push(bookmark);
+        currentBookmark = bookmark;
+        toast('Folder bookmarked', 'success');
+      } catch (err) {
+        toast(`Could not bookmark: ${err.message}`, 'error');
+        return;
+      }
+    }
+    document.getElementById('bookmarks-btn').title = `Bookmarked folders (${bookmarksList.length})`;
+    updateBookmarkStar();
+  }
+
+  function renderBookmarksList() {
+    const tbody = document.getElementById('bookmarks-tbody');
+    if (!bookmarksList.length) {
+      tbody.innerHTML = '<tr><td colspan="3" class="empty">No bookmarked folders yet — star one from the folder picker</td></tr>';
+      return;
+    }
+    tbody.innerHTML = bookmarksList.map(b => {
+      const shortLink = b.link.replace(/^https?:\/\//, '');
+      return `<tr>
+        <td class="link-cell" title="${esc(b.link)}">${esc(shortLink)}</td>
+        <td style="color:var(--muted);font-size:12px;white-space:nowrap">${b.downloaded.length} file${b.downloaded.length !== 1 ? 's' : ''}</td>
+        <td><div class="row-actions">
+          <button class="secondary sm" data-bm-action="browse" data-id="${esc(b.id)}">Browse</button>
+          <button class="danger sm" data-bm-action="remove" data-id="${esc(b.id)}">Remove</button>
+        </div></td>
+      </tr>`;
+    }).join('');
+  }
+
+  function openBookmarksList() {
+    document.getElementById('bookmarks-overlay').classList.remove('hidden');
+    renderBookmarksList();
+  }
+
+  document.getElementById('bookmarks-tbody').addEventListener('click', async e => {
+    const btn = e.target.closest('button[data-bm-action]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const bookmark = bookmarksList.find(b => b.id === id);
+    if (!bookmark) return;
+    if (btn.dataset.bmAction === 'browse') {
+      document.getElementById('bookmarks-overlay').classList.add('hidden');
+      openFolderPicker(bookmark.link, bookmark.dest);
+    } else if (btn.dataset.bmAction === 'remove') {
+      await apiFetch(`/api/bookmarks/${id}`, { method: 'DELETE' }).catch(() => {});
+      bookmarksList = bookmarksList.filter(b => b.id !== id);
+      document.getElementById('bookmarks-btn').title = `Bookmarked folders (${bookmarksList.length})`;
+      renderBookmarksList();
+    }
+  });
 
   // ── Archive.org file picker ─────────────────────────────────────────────────
   let archiveIdentifier = null;
@@ -2007,6 +2144,13 @@
   document.getElementById('browse-confirm-btn').addEventListener('click', browseConfirm);
   document.getElementById('browse-cancel-btn').addEventListener('click', browseDismiss);
   document.getElementById('browse-close').addEventListener('click', browseDismiss);
+  document.getElementById('browse-bookmark-btn').addEventListener('click', toggleBookmarkStar);
+
+  // ── Bookmarks modal wiring ───────────────────────────────────────────────────
+  document.getElementById('bookmarks-btn').addEventListener('click', openBookmarksList);
+  document.getElementById('bookmarks-close').addEventListener('click', () => {
+    document.getElementById('bookmarks-overlay').classList.add('hidden');
+  });
 
   // ── Archive.org modal button wiring ─────────────────────────────────────────
   document.getElementById('archive-confirm-btn').addEventListener('click', archiveConfirm);
@@ -2041,6 +2185,7 @@
   loadLog();
   loadAria2Transfers();
   loadYoutubeJobs();
+  loadBookmarksList();
 
   setInterval(loadTransfers, 5000);
   setInterval(loadQueue, 5000);
