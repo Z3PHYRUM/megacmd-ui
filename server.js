@@ -239,9 +239,8 @@ const BROWSE_DISCOVERY_TIMEOUT_MS = 30000;
 // /api/browse/confirm can identify and cancel "straggler" transfers that
 // MEGAcmd kept discovering after the picker's discovery window gave up —
 // without this, a folder too large to fully enumerate in time could leave
-// leftover transfers the user never saw, which the confirm-time global
-// resume would otherwise release along with the ones actually selected.
-const browseSessions = new Map(); // browseId -> { existingTags: Set, createdAt: number }
+// leftover transfers the user never saw and never explicitly chose.
+const browseSessions = new Map(); // browseId -> { existingTags: Set, destination: string, createdAt: number }
 const BROWSE_SESSION_TTL_MS = 60 * 60 * 1000;
 
 function cleanupBrowseSessions() {
@@ -250,6 +249,47 @@ function cleanupBrowseSessions() {
     if (session.createdAt < cutoff) browseSessions.delete(id);
   }
 }
+
+// mega-get's background discovery for a huge folder can keep adding transfers
+// to MEGAcmd's queue for minutes after /api/browse/confirm has already
+// returned -- well past both the discovery window and the one-time straggler
+// sweep at confirm time. A previous version of this handled that by pausing
+// everything globally during discovery and clearing the global pause on
+// confirm; that turned out to be the actual bug (confirmed live: selecting 1
+// file out of a huge folder resulted in ~999 others being resumed too),
+// because "clear the global pause" resumes *everything* currently paused —
+// including stragglers that arrived after the one-time sweep ran. So instead:
+// never touch pause/resume in bulk. Individually pause each transfer as it's
+// discovered, individually resume only what's kept, and keep sweeping for new
+// arrivals under the same destination for a while after confirm, cancelling
+// anything that isn't a kept tag.
+const postConfirmWatches = []; // { destination: string, keepTags: Set, expiresAt: number }
+const POST_CONFIRM_WATCH_MS = 5 * 60 * 1000;
+const POST_CONFIRM_SWEEP_MS = 5000;
+
+async function sweepPostConfirmWatches() {
+  const now = Date.now();
+  for (let i = postConfirmWatches.length - 1; i >= 0; i--) {
+    if (postConfirmWatches[i].expiresAt < now) postConfirmWatches.splice(i, 1);
+  }
+  if (!postConfirmWatches.length) return;
+
+  try {
+    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
+    const transfers = parseTransfers(raw);
+    for (const watch of postConfirmWatches) {
+      const prefix = watch.destination.endsWith('/') ? watch.destination : watch.destination + '/';
+      const stragglerTags = transfers
+        .filter(t => t.tag && t.filename?.startsWith(prefix) && !watch.keepTags.has(t.tag))
+        .map(t => t.tag);
+      if (stragglerTags.length) {
+        await runInBatches(stragglerTags, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
+      }
+    }
+  } catch {}
+}
+setInterval(sweepPostConfirmWatches, POST_CONFIRM_SWEEP_MS);
+
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // Runs fn over items in fixed-size concurrent batches instead of one-at-a-time,
@@ -938,12 +978,9 @@ app.post('/api/browse', async (req, res) => {
     parseTransfers(raw).forEach(t => { if (t.tag) existingTags.add(t.tag); });
   } catch {}
 
-  // Pause globally *before* discovery starts so newly-created transfers come in
-  // already paused. Belt-and-suspenders with the per-tag pause below, in case
-  // the global pause doesn't retroactively cover transfers MEGAcmd hasn't
-  // created yet — important for folders with hundreds of subfolders, where we
-  // don't want any bytes moving before the picker's OK is clicked.
-  try { await dockerExec('mega-transfers', ['-p', '-a']); } catch {}
+  // Deliberately NOT using a global pause (-p -a) here: it was tried and caused
+  // a worse bug than it solved — see the comment on postConfirmWatches below.
+  // We rely solely on the eager per-tag pause in the discovery loop.
 
   // Background mega-get so it returns immediately after telling the daemon to queue the folder.
   // $1/$2 positional params avoid shell injection.
@@ -989,12 +1026,12 @@ app.post('/api/browse/confirm', async (req, res) => {
   const { keep = [], cancel = [], bookmarkId, keptFiles = [], browseId } = req.body;
   const keepSet = new Set(keep.map(String));
 
-  // If we have a browse session, also cancel any "straggler" transfers MEGAcmd
-  // kept discovering after the picker's discovery window gave up — otherwise
-  // the global resume-all below would release them too, even though the user
-  // never got to see or choose them (see browseSessions comment above). Scoped
-  // to the session's destination path so an unrelated download started in the
-  // same window isn't swept up by mistake.
+  // If we have a browse session, cancel any "straggler" transfers MEGAcmd kept
+  // discovering after the picker's discovery window gave up but before this
+  // confirm ran — the user never got to see or choose them. Scoped to the
+  // session's destination path so an unrelated download started in the same
+  // window isn't swept up by mistake. (Further stragglers that arrive *after*
+  // this point are handled by postConfirmWatches below.)
   let cancelTags = cancel.map(String);
   const session = browseId && browseSessions.get(browseId);
   if (session) {
@@ -1011,10 +1048,20 @@ app.post('/api/browse/confirm', async (req, res) => {
   }
 
   await runInBatches(cancelTags, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
+  // Resume only the specific kept tags -- deliberately never a blanket "-r -a"
+  // here (see postConfirmWatches comment: that was the actual cause of the
+  // over-download bug, not just an incomplete straggler sweep).
   await runInBatches(keep, tag => dockerExec('mega-transfers', ['-r', String(tag)]).catch(() => {}));
-  // Clear any global pause so selected transfers actually start
-  if (keep.length) try { await dockerExec('mega-transfers', ['-r', '-a']); } catch {}
   if (keep.length) logActivity('DOWNLOADED', `${keep.length} file(s) selected from folder`, `${cancelTags.length} skipped`);
+
+  // mega-get's background discovery can keep adding transfers to this same
+  // destination for minutes after this request returns, well past the one-time
+  // straggler sweep above -- keep watching and cancelling anything new that
+  // isn't a kept tag for a while, so a slow-to-enumerate folder can't still
+  // sneak files past the picker.
+  if (session) {
+    postConfirmWatches.push({ destination: session.destination, keepTags: keepSet, expiresAt: Date.now() + POST_CONFIRM_WATCH_MS });
+  }
 
   if (bookmarkId && keptFiles.length) {
     const bookmark = bookmarks.find(b => b.id === bookmarkId);
