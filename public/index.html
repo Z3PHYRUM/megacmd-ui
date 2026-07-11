@@ -505,6 +505,7 @@
   <img src="/logo.svg" alt="MEGAcmd" class="app-logo">
   <div id="status-dot" class="dot"></div>
   <span id="status-text">Checking status…</span>
+  <span id="version-text" style="color:var(--muted);opacity:0.6"></span>
   <button class="icon" id="settings-btn" title="Settings">⚙</button>
 </div>
 
@@ -969,10 +970,11 @@
   // ── Status bar ──────────────────────────────────────────────────────────────
   async function checkStatus() {
     try {
-      const { loggedIn, whoami } = await apiFetch('/api/status');
+      const { loggedIn, whoami, version } = await apiFetch('/api/status');
       document.getElementById('status-dot').className = `dot ${loggedIn ? 'online' : 'offline'}`;
       document.getElementById('status-text').textContent = loggedIn
         ? `Logged in as ${whoami}` : `Not logged in — ${whoami}`;
+      if (version) document.getElementById('version-text').textContent = `v${version}`;
     } catch {
       document.getElementById('status-dot').className = 'dot offline';
       document.getElementById('status-text').textContent = 'MEGAcmd unreachable';

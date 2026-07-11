@@ -6,6 +6,7 @@ const Docker = require('dockerode');
 const fs = require('fs');
 const path = require('path');
 const { spawn, execFile } = require('child_process');
+const { version: APP_VERSION } = require('./package.json');
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
@@ -158,7 +159,7 @@ function dockerExec(megaCommand, args = []) {
       // "bigfolder" in the link simulates a folder with more files than
       // TRANSFER_LIMIT, for testing that discovery/cleanup logic doesn't
       // silently stop working past the display cap.
-      const fileCount = /bigfolder/i.test(link) ? 1200 : /\/folder\//i.test(link) ? 4 : 1;
+      const fileCount = /bigfolder/i.test(link) ? 4682 : /\/folder\//i.test(link) ? 4 : 1;
       for (let i = 0; i < fileCount; i++) {
         mockTransfers.push({
           tag: String(Date.now() + i).slice(-6),
@@ -279,13 +280,21 @@ const postConfirmWatches = []; // { destination: string, keepTags: Set, expiresA
 const POST_CONFIRM_WATCH_MS = 5 * 60 * 1000;
 const POST_CONFIRM_SWEEP_MS = 5000;
 
+// A single sweep can involve thousands of individual cancel calls for a huge
+// folder and take a while -- this guard skips overlapping ticks rather than
+// letting two sweeps race on the same tags, and the interval effectively
+// becomes "sweep again as soon as the last one finishes" for a big backlog.
+let sweepInProgress = false;
+
 async function sweepPostConfirmWatches() {
+  if (sweepInProgress) return;
   const now = Date.now();
   for (let i = postConfirmWatches.length - 1; i >= 0; i--) {
     if (postConfirmWatches[i].expiresAt < now) postConfirmWatches.splice(i, 1);
   }
   if (!postConfirmWatches.length) return;
 
+  sweepInProgress = true;
   try {
     const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
     const transfers = parseTransfers(raw);
@@ -294,11 +303,16 @@ async function sweepPostConfirmWatches() {
       const stragglerTags = transfers
         .filter(t => t.tag && t.filename?.startsWith(prefix) && !watch.keepTags.has(t.tag))
         .map(t => t.tag);
+      // No verify-and-retry here -- each sweep cycle re-discovers whatever's
+      // still present and retries it, so the periodic nature of this loop is
+      // itself the retry mechanism, without an extra query per sweep.
       if (stragglerTags.length) {
-        await cancelTagsReliably(stragglerTags);
+        await runInBatches(stragglerTags, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
       }
     }
-  } catch {}
+  } catch {} finally {
+    sweepInProgress = false;
+  }
 }
 setInterval(sweepPostConfirmWatches, POST_CONFIRM_SWEEP_MS);
 
@@ -307,29 +321,10 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 // Runs fn over items in fixed-size concurrent batches instead of one-at-a-time,
 // so confirming/cancelling a folder with hundreds of files doesn't take one
 // docker exec round-trip per file, serially.
-async function runInBatches(items, fn, batchSize = 15) {
+async function runInBatches(items, fn, batchSize = 25) {
   for (let i = 0; i < items.length; i += batchSize) {
     await Promise.all(items.slice(i, i + batchSize).map(fn));
   }
-}
-
-// Cancels a batch of tags and verifies they actually disappeared, retrying
-// once for any that are still present -- a single fire-and-forget batch
-// wasn't reliable enough in practice for very large batches (confirmed live:
-// ~999 explicitly-cancelled tags out of 1000 didn't actually cancel on the
-// first pass and ended up resumed/retrying instead).
-async function cancelTagsReliably(tags) {
-  if (!tags.length) return;
-  await runInBatches(tags, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
-  try {
-    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
-    const stillPresent = new Set(parseTransfers(raw).map(t => t.tag));
-    const remaining = tags.filter(t => stillPresent.has(t));
-    if (remaining.length) {
-      console.log(`[BROWSE] ${remaining.length}/${tags.length} cancel(s) needed a retry`);
-      await runInBatches(remaining, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
-    }
-  } catch {}
 }
 
 // Adds a magnet link and waits for aria2 to resolve its BitTorrent metadata
@@ -862,9 +857,9 @@ app.get('/api/status', async (req, res) => {
   try {
     const whoami = await dockerExec('mega-whoami');
     const text = whoami.trim();
-    res.json({ loggedIn: text.length > 0 && !/not logged/i.test(text), whoami: text });
+    res.json({ loggedIn: text.length > 0 && !/not logged/i.test(text), whoami: text, version: APP_VERSION });
   } catch (err) {
-    res.json({ loggedIn: false, whoami: err.message });
+    res.json({ loggedIn: false, whoami: err.message, version: APP_VERSION });
   }
 });
 
@@ -1060,41 +1055,29 @@ app.post('/api/browse/confirm', async (req, res) => {
   const { keep = [], cancel = [], bookmarkId, keptFiles = [], browseId } = req.body;
   const keepSet = new Set(keep.map(String));
 
-  // If we have a browse session, cancel any "straggler" transfers MEGAcmd kept
-  // discovering after the picker's discovery window gave up but before this
-  // confirm ran — the user never got to see or choose them. Scoped to the
-  // session's destination path so an unrelated download started in the same
-  // window isn't swept up by mistake. (Further stragglers that arrive *after*
-  // this point are handled by postConfirmWatches below.)
-  let cancelTags = cancel.map(String);
+  // Resume just the kept tags -- typically a short list, so this is fast.
+  // Deliberately never a blanket "-r -a" (see postConfirmWatches comment:
+  // that was the actual cause of the original over-download bug).
+  runInBatches(keep, tag => dockerExec('mega-transfers', ['-r', String(tag)]).catch(() => {})).catch(() => {});
+  if (keep.length) logActivity('DOWNLOADED', `${keep.length} file(s) selected from folder`, `${cancel.length} skipped`);
+
+  // Cancelling can mean thousands of individual docker exec calls for a huge
+  // folder -- don't make the browser wait on that (this used to leave
+  // "Download Selected" stuck for a long time). A registered watch's own
+  // periodic sweep (every 5s, for the next 5 minutes) cancels everything
+  // under this destination that isn't a kept tag -- which covers both the
+  // explicit cancel list AND any straggler mega-get is still discovering in
+  // the background -- with each sweep cycle naturally retrying anything the
+  // previous one didn't get to, so no separate verify-and-retry pass is
+  // needed here.
   const session = browseId && browseSessions.get(browseId);
   if (session) {
-    try {
-      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
-      const prefix = session.destination.endsWith('/') ? session.destination : session.destination + '/';
-      const stragglers = parseTransfers(raw)
-        .filter(t => t.tag && t.filename?.startsWith(prefix))
-        .filter(t => !session.existingTags.has(t.tag) && !keepSet.has(t.tag) && !cancelTags.includes(t.tag))
-        .map(t => t.tag);
-      cancelTags = [...cancelTags, ...stragglers];
-    } catch {}
-    browseSessions.delete(browseId);
-  }
-
-  await cancelTagsReliably(cancelTags);
-  // Resume only the specific kept tags -- deliberately never a blanket "-r -a"
-  // here (see postConfirmWatches comment: that was the actual cause of the
-  // over-download bug, not just an incomplete straggler sweep).
-  await runInBatches(keep, tag => dockerExec('mega-transfers', ['-r', String(tag)]).catch(() => {}));
-  if (keep.length) logActivity('DOWNLOADED', `${keep.length} file(s) selected from folder`, `${cancelTags.length} skipped`);
-
-  // mega-get's background discovery can keep adding transfers to this same
-  // destination for minutes after this request returns, well past the one-time
-  // straggler sweep above -- keep watching and cancelling anything new that
-  // isn't a kept tag for a while, so a slow-to-enumerate folder can't still
-  // sneak files past the picker.
-  if (session) {
     postConfirmWatches.push({ destination: session.destination, keepTags: keepSet, expiresAt: Date.now() + POST_CONFIRM_WATCH_MS });
+    browseSessions.delete(browseId);
+  } else if (cancel.length) {
+    // No valid session (e.g. expired) -- fall back to cancelling just the
+    // explicit list, still in the background.
+    runInBatches(cancel.map(String), tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {})).catch(() => {});
   }
 
   if (bookmarkId && keptFiles.length) {
