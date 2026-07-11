@@ -33,7 +33,11 @@ const NTFY_URL_DEFAULT   = process.env.NTFY_URL || 'http://ntfy:2586/ultraframe'
 if (MOCK) console.log('[MOCK] Running in mock mode — no Docker commands will be executed');
 
 app.use(cors());
-app.use(express.json());
+// Default 100kb body limit is too small for /api/browse/confirm on a huge
+// folder -- thousands of full relative file paths easily exceeds it, which
+// previously surfaced as an opaque "Unexpected token '<'" JSON parse error
+// (Express's default error page for a rejected oversized body is HTML).
+app.use(express.json({ limit: '20mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/images', express.static(path.join(__dirname, 'images')));
 
@@ -1385,6 +1389,15 @@ app.post('/api/settings', (req, res) => {
   }
   saveSettings();
   res.json({ ntfyUrl: settings.ntfyUrl, ntfyUrlDefault: NTFY_URL_DEFAULT, notifications: settings.notifications });
+});
+
+// Ensure API errors always come back as JSON, not Express's default HTML
+// error page — a body-parser error (e.g. exceeding the size limit) would
+// otherwise surface client-side as an opaque "Unexpected token '<'" JSON
+// parse failure instead of a readable message.
+app.use((err, req, res, next) => {
+  console.error(`[ERROR] ${err.message}`);
+  res.status(err.status || 500).json({ error: err.message || 'Internal server error' });
 });
 
 app.listen(PORT, () => {
