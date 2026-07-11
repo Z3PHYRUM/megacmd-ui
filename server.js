@@ -13,7 +13,7 @@ const app = express();
 const PORT               = process.env.PORT || 8085;
 const MEGACMD_CONTAINER  = process.env.MEGACMD_CONTAINER || 'megacmd';
 const MOCK               = process.env.MOCK === '1';
-const TRANSFER_LIMIT     = 200;
+const TRANSFER_LIMIT     = 1000;
 const RETRY_INTERVAL_MS  = (parseInt(process.env.RETRY_INTERVAL_MIN) || 15) * 60 * 1000;
 const DATA_DIR           = process.env.DATA_DIR || __dirname;
 const QUEUE_FILE         = path.join(DATA_DIR, 'queue.json');
@@ -233,7 +233,23 @@ async function aria2AddUri(url, displayName, dir) {
 
 const TORRENT_METADATA_TIMEOUT_MS = 30000;
 const TORRENT_METADATA_POLL_MS    = 700;
-const BROWSE_DISCOVERY_TIMEOUT_MS = 20000;
+const BROWSE_DISCOVERY_TIMEOUT_MS = 30000;
+
+// Tracks the tag snapshot taken right before a folder browse started, so
+// /api/browse/confirm can identify and cancel "straggler" transfers that
+// MEGAcmd kept discovering after the picker's discovery window gave up —
+// without this, a folder too large to fully enumerate in time could leave
+// leftover transfers the user never saw, which the confirm-time global
+// resume would otherwise release along with the ones actually selected.
+const browseSessions = new Map(); // browseId -> { existingTags: Set, createdAt: number }
+const BROWSE_SESSION_TTL_MS = 60 * 60 * 1000;
+
+function cleanupBrowseSessions() {
+  const cutoff = Date.now() - BROWSE_SESSION_TTL_MS;
+  for (const [id, session] of browseSessions) {
+    if (session.createdAt < cutoff) browseSessions.delete(id);
+  }
+}
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // Runs fn over items in fixed-size concurrent batches instead of one-at-a-time,
@@ -910,6 +926,7 @@ app.post('/api/queue/clear', (req, res) => {
 
 // ── Browse routes ─────────────────────────────────────────────────────────────
 app.post('/api/browse', async (req, res) => {
+  cleanupBrowseSessions();
   const { link, dest } = req.body;
   if (!link) return res.status(400).json({ error: 'No link provided' });
   const destination = resolveDest(dest);
@@ -961,17 +978,43 @@ app.post('/api/browse', async (req, res) => {
   if (!newTransfers.length)
     return res.status(500).json({ error: 'No files found — quota exceeded, link invalid, or folder is empty' });
 
+  const browseId = queueId();
+  browseSessions.set(browseId, { existingTags, destination, createdAt: Date.now() });
+
   logActivity('BROWSE', link, `${newTransfers.length} file(s) found`);
-  res.json({ files: newTransfers, dest: destination });
+  res.json({ files: newTransfers, dest: destination, browseId });
 });
 
 app.post('/api/browse/confirm', async (req, res) => {
-  const { keep = [], cancel = [], bookmarkId, keptFiles = [] } = req.body;
-  await runInBatches(cancel, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
+  const { keep = [], cancel = [], bookmarkId, keptFiles = [], browseId } = req.body;
+  const keepSet = new Set(keep.map(String));
+
+  // If we have a browse session, also cancel any "straggler" transfers MEGAcmd
+  // kept discovering after the picker's discovery window gave up — otherwise
+  // the global resume-all below would release them too, even though the user
+  // never got to see or choose them (see browseSessions comment above). Scoped
+  // to the session's destination path so an unrelated download started in the
+  // same window isn't swept up by mistake.
+  let cancelTags = cancel.map(String);
+  const session = browseId && browseSessions.get(browseId);
+  if (session) {
+    try {
+      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
+      const prefix = session.destination.endsWith('/') ? session.destination : session.destination + '/';
+      const stragglers = parseTransfers(raw)
+        .filter(t => t.tag && t.filename?.startsWith(prefix))
+        .filter(t => !session.existingTags.has(t.tag) && !keepSet.has(t.tag) && !cancelTags.includes(t.tag))
+        .map(t => t.tag);
+      cancelTags = [...cancelTags, ...stragglers];
+    } catch {}
+    browseSessions.delete(browseId);
+  }
+
+  await runInBatches(cancelTags, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
   await runInBatches(keep, tag => dockerExec('mega-transfers', ['-r', String(tag)]).catch(() => {}));
   // Clear any global pause so selected transfers actually start
   if (keep.length) try { await dockerExec('mega-transfers', ['-r', '-a']); } catch {}
-  if (keep.length) logActivity('DOWNLOADED', `${keep.length} file(s) selected from folder`, `${cancel.length} skipped`);
+  if (keep.length) logActivity('DOWNLOADED', `${keep.length} file(s) selected from folder`, `${cancelTags.length} skipped`);
 
   if (bookmarkId && keptFiles.length) {
     const bookmark = bookmarks.find(b => b.id === bookmarkId);

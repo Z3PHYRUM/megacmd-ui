@@ -21,7 +21,7 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 
 - **MEGA downloads** — paste one or more Mega links and queue them all at once; its own transfer table (progress/speed/size) is built into the same panel
 - **Base64 link decoding** — pasted links that turn out to be base64-encoded are transparently decoded; a decoded MEGA link is queued automatically, anything else is surfaced in a "Needs Attention" panel instead of silently failing
-- **Folder file picker** — for `mega.nz/folder/` links, browse contents and select individual files before downloading; nothing transfers before you click "Download Selected" (MEGAcmd's transfer queue is globally paused before discovery even starts)
+- **Folder file picker** — for `mega.nz/folder/` links, browse contents and select individual files before downloading; nothing transfers before you click "Download Selected" (MEGAcmd's transfer queue is globally paused before discovery even starts, and anything MEGAcmd discovers *after* the picker stops waiting is cancelled rather than silently downloaded); files are listed alphabetically with a filter box to narrow a large folder down by name
 - **Folder bookmarks** — star a folder from the file picker (yellow when bookmarked) to save it for revisiting later; a "★" button in the MEGA Downloads header lists bookmarked folders and re-opens the picker for one. Files already downloaded from a bookmarked folder are flagged "Downloaded" and start unchecked next time, so you can pull a huge folder down a few files at a time without re-picking the same ones
 - **Bandwidth quota handling** — quota-exceeded downloads are automatically added to a retry queue and retried every 15 minutes
 - **HTTP and Torrent Downloads section** — archive.org, direct HTTP(S), and magnet/torrent downloads all live in one panel since they share the same aria2 queue: an `archive.org` URL box (opens a file picker) and a paste box for direct URLs or magnet links (either box can be used independently), one shared transfer table below both
@@ -35,6 +35,7 @@ Designed for homelab use — accessed over Tailscale, no authentication required
 - **Collapsible sections** — each downloader panel can be collapsed via the arrow in its header to reduce clutter
 - **Color-coded activity log** — MEGA, Archive.org, Direct, Torrent, and YouTube events each get their own accent color in the log (MEGA and YouTube's section headings match too); a bolder/saturated version of the same color marks a completed download, failures are always red
 - **Stats bars** — each transfer table (MEGA, HTTP/Torrent, YouTube) shows a live summary (count by status, total size where known), with per-row and bulk pause/resume/cancel controls, auto-refreshing every 5 seconds
+- **Scrollable transfer table** — the MEGA transfer table caps its height and scrolls internally (with a pinned header) instead of stretching the page, so a long list stays contained
 - **Per-transfer controls** — pause, resume, or cancel individual transfers (MEGA and aria2); cancel or dismiss individual YouTube jobs
 - **Bulk controls** — pause all, resume all, cancel all (MEGA and aria2 tables)
 - **Activity log** — history of downloads, failures, and queue events (last 200 entries)
@@ -158,7 +159,7 @@ The parser reads the header row dynamically, so as long as the columns include T
 
 ### Folder picker is slow or incomplete for very large folders
 
-The folder file picker currently still has to ask MEGAcmd to actually enqueue the folder's contents to discover what's inside (it globally pauses transfers first so nothing downloads before you confirm, but MEGAcmd still has to enumerate every file). For folders with hundreds of subfolders, discovery can take a while, and the picker gives up waiting after 20 seconds — if that happens, the file list may be incomplete. A future version may switch to a pure listing command (`mega-ls`) that doesn't touch the transfer queue at all, which would remove this limitation; that's not implemented yet.
+The folder file picker currently still has to ask MEGAcmd to actually enqueue the folder's contents to discover what's inside (it globally pauses transfers first so nothing downloads before you confirm, but MEGAcmd still has to enumerate every file). For folders with hundreds of subfolders, discovery can take a while, and the picker gives up waiting after 30 seconds — if that happens, the file list may be incomplete. This is safe either way: anything MEGAcmd keeps discovering after the picker stops waiting is cancelled on confirm rather than downloaded, so an incomplete list under-shows files, it never over-downloads them. If you hit this, re-browsing the same folder link again (or picking it up from Bookmarks) will show whatever wasn't caught the first time. A future version may switch to a pure listing command (`mega-ls`) that doesn't touch the transfer queue at all, which would remove this limitation; that's not implemented yet — see the note in [Compatibility](#compatibility) about testing this on your MEGAcmd version.
 
 ### MEGAcmd shows "not logged in"
 
@@ -222,6 +223,8 @@ The archive.org, aria2, torrent, and YouTube features are **not mocked**: `/api/
 ## Compatibility
 
 Tested with MEGAcmd **2.5.2.1**. The transfer parser uses `--col-separator=|` and reads column names from the header row, so it should adapt to other versions automatically. If you run a different version and hit parsing issues, open an issue with the output of `mega-transfers --limit=5 --col-separator=|`.
+
+**Known gap, being investigated:** the folder picker (see [Troubleshooting](#folder-picker-is-slow-or-incomplete-for-very-large-folders)) currently discovers a folder's contents by actually enqueueing it rather than a pure listing call, because it's unconfirmed whether `mega-ls` can list a public folder link's contents on this MEGAcmd version without importing it first. If you can confirm `docker exec megacmd mega-ls -R "<a real mega.nz/folder/... link>"` works, that would unblock switching to a listing-only approach with no discovery timeout at all.
 
 ## Tech Stack
 

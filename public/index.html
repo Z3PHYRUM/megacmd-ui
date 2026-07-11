@@ -151,6 +151,11 @@
       border-radius: 6px;
     }
 
+    /* Contains long transfer lists in a fixed-height scroll area instead of
+       stretching the page, with the header pinned so columns stay readable. */
+    .table-wrap-scroll { max-height: 620px; overflow-y: auto; }
+    .table-wrap-scroll th { position: sticky; top: 0; z-index: 1; }
+
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
 
     th {
@@ -522,6 +527,7 @@
         <div class="toolbar" style="margin:0">
           <button class="secondary sm" onclick="browseSelectAll(true)">Select All</button>
           <button class="secondary sm" onclick="browseSelectAll(false)">Select None</button>
+          <input type="text" id="browse-filter" placeholder="Filter files…" style="width:160px">
           <span class="countdown" id="browse-count"></span>
         </div>
         <div class="browse-file-wrap table-wrap">
@@ -786,7 +792,7 @@
         <button class="danger" onclick="bulkAction('cancel')">Cancel All</button>
         <button class="success" id="dismiss-completed-btn" onclick="dismissCompleted()" style="display:none">Dismiss Completed</button>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap table-wrap-scroll">
         <table>
           <thead>
             <tr>
@@ -803,7 +809,7 @@
         </table>
       </div>
       <div class="truncation-warn hidden" id="truncation-warn">
-        ⚠ Showing 200 transfers — list may be truncated. Cancel or clear completed transfers to see all.
+        ⚠ Showing 1000 transfers — list may be truncated. Cancel or clear completed transfers to see all.
       </div>
       <div class="refresh-hint" id="refresh-hint">Auto-refreshes every 5 seconds</div>
     </div>
@@ -1144,11 +1150,12 @@
   }
 
   // ── Folder picker ───────────────────────────────────────────────────────────
-  let currentBrowseLink = null, currentBrowseDest = null, currentBookmark = null;
+  let currentBrowseLink = null, currentBrowseDest = null, currentBookmark = null, currentBrowseId = null;
 
   function openFolderPicker(link, dest) {
     currentBrowseLink = link;
     currentBrowseDest = dest;
+    currentBrowseId = null;
     currentBookmark = findBookmarkByLink(link);
     updateBookmarkStar();
 
@@ -1158,9 +1165,11 @@
     document.getElementById('browse-content').style.display = 'none';
     document.getElementById('browse-error').classList.add('hidden');
     document.getElementById('browse-confirm-btn').disabled = true;
+    document.getElementById('browse-filter').value = '';
 
     apiFetch('/api/browse', { method: 'POST', body: JSON.stringify({ link, dest }) })
-      .then(({ files }) => {
+      .then(({ files, browseId }) => {
+        currentBrowseId = browseId;
         document.getElementById('browse-loading').style.display = 'none';
         renderBrowseFiles(files, dest);
         document.getElementById('browse-content').style.display = 'flex';
@@ -1178,9 +1187,14 @@
   function renderBrowseFiles(files, dest) {
     const prefix = dest.endsWith('/') ? dest : dest + '/';
     const downloaded = new Set(currentBookmark?.downloaded || []);
-    document.getElementById('browse-tbody').innerHTML = files.map(f => {
-      const rel = f.filename.startsWith(prefix) ? f.filename.slice(prefix.length) : f.filename;
-      const isDownloaded = downloaded.has(rel);
+    const rows = files
+      .map(f => {
+        const rel = f.filename.startsWith(prefix) ? f.filename.slice(prefix.length) : f.filename;
+        return { f, rel, isDownloaded: downloaded.has(rel) };
+      })
+      .sort((a, b) => a.rel.localeCompare(b.rel, undefined, { numeric: true, sensitivity: 'base' }));
+
+    document.getElementById('browse-tbody').innerHTML = rows.map(({ f, rel, isDownloaded }) => {
       const badge = isDownloaded ? ' <span class="badge complete" style="margin-left:6px">Downloaded</span>' : '';
       return `<tr class="${isDownloaded ? 'browse-row-downloaded' : ''}">
         <td style="padding:7px 6px 7px 11px">
@@ -1194,6 +1208,14 @@
       .forEach(cb => cb.addEventListener('change', updateBrowseCount));
   }
 
+  function filterBrowseRows() {
+    const q = document.getElementById('browse-filter').value.trim().toLowerCase();
+    document.querySelectorAll('#browse-tbody tr').forEach(tr => {
+      const rel = tr.querySelector('.browse-cb')?.dataset.rel || '';
+      tr.style.display = !q || rel.toLowerCase().includes(q) ? '' : 'none';
+    });
+  }
+
   function updateBrowseCount() {
     const all     = document.querySelectorAll('.browse-cb').length;
     const checked = document.querySelectorAll('.browse-cb:checked').length;
@@ -1201,7 +1223,11 @@
   }
 
   function browseSelectAll(select) {
-    document.querySelectorAll('.browse-cb').forEach(cb => { cb.checked = select; });
+    document.querySelectorAll('#browse-tbody tr').forEach(tr => {
+      if (tr.style.display === 'none') return;
+      const cb = tr.querySelector('.browse-cb');
+      if (cb) cb.checked = select;
+    });
     updateBrowseCount();
   }
 
@@ -1217,7 +1243,7 @@
     try {
       await apiFetch('/api/browse/confirm', {
         method: 'POST',
-        body: JSON.stringify({ keep, cancel, bookmarkId: currentBookmark?.id, keptFiles }),
+        body: JSON.stringify({ keep, cancel, bookmarkId: currentBookmark?.id, keptFiles, browseId: currentBrowseId }),
       });
       if (currentBookmark) {
         currentBookmark.downloaded = [...new Set([...currentBookmark.downloaded, ...keptFiles])];
@@ -1237,7 +1263,7 @@
   async function browseDismiss() {
     const tags = [...document.querySelectorAll('.browse-cb')].map(cb => cb.dataset.tag);
     if (tags.length)
-      await apiFetch('/api/browse/confirm', { method: 'POST', body: JSON.stringify({ keep: [], cancel: tags }) }).catch(() => {});
+      await apiFetch('/api/browse/confirm', { method: 'POST', body: JSON.stringify({ keep: [], cancel: tags, browseId: currentBrowseId }) }).catch(() => {});
     document.getElementById('browse-overlay').classList.add('hidden');
   }
 
@@ -2145,6 +2171,7 @@
   document.getElementById('browse-cancel-btn').addEventListener('click', browseDismiss);
   document.getElementById('browse-close').addEventListener('click', browseDismiss);
   document.getElementById('browse-bookmark-btn').addEventListener('click', toggleBookmarkStar);
+  document.getElementById('browse-filter').addEventListener('input', filterBrowseRows);
 
   // ── Bookmarks modal wiring ───────────────────────────────────────────────────
   document.getElementById('bookmarks-btn').addEventListener('click', openBookmarksList);
