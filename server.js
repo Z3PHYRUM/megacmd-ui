@@ -126,7 +126,12 @@ function applyMockAction(flag, tagArg) {
 }
 
 // ── Docker / mock exec ────────────────────────────────────────────────────────
-const EXEC_TIMEOUT = { default: 10000, 'mega-get': 0 };  // 0 = no timeout
+// mega-transfers gets a longer timeout than the default: listing thousands of
+// transfers (as the folder-picker cleanup logic does) can genuinely take
+// longer than 10s against a real, large queue -- and a silent timeout there
+// means postConfirmWatches' cleanup sweep fails every single cycle forever,
+// leaving unwanted transfers paused indefinitely instead of cancelled.
+const EXEC_TIMEOUT = { default: 10000, 'mega-get': 0, 'mega-transfers': 45000 };  // 0 = no timeout
 
 function dockerExec(megaCommand, args = []) {
   if (MOCK) {
@@ -280,6 +285,21 @@ const postConfirmWatches = []; // { destination: string, keepTags: Set, expiresA
 const POST_CONFIRM_WATCH_MS = 5 * 60 * 1000;
 const POST_CONFIRM_SWEEP_MS = 5000;
 
+// Merges into an existing watch for the same destination rather than stacking
+// a duplicate -- two independent watches for the same destination would each
+// cancel anything outside *their own* keepTags, so a second confirm on the
+// same folder within the watch window could have the first watch cancel the
+// second one's just-kept file (and vice versa).
+function registerPostConfirmWatch(destination, keepTags) {
+  const existing = postConfirmWatches.find(w => w.destination === destination);
+  if (existing) {
+    keepTags.forEach(t => existing.keepTags.add(t));
+    existing.expiresAt = Date.now() + POST_CONFIRM_WATCH_MS;
+  } else {
+    postConfirmWatches.push({ destination, keepTags: new Set(keepTags), expiresAt: Date.now() + POST_CONFIRM_WATCH_MS });
+  }
+}
+
 // A single sweep can involve thousands of individual cancel calls for a huge
 // folder and take a while -- this guard skips overlapping ticks rather than
 // letting two sweeps race on the same tags, and the interval effectively
@@ -307,10 +327,13 @@ async function sweepPostConfirmWatches() {
       // still present and retries it, so the periodic nature of this loop is
       // itself the retry mechanism, without an extra query per sweep.
       if (stragglerTags.length) {
+        console.log(`[BROWSE] sweeping ${stragglerTags.length} straggler(s) under ${watch.destination}`);
         await runInBatches(stragglerTags, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
       }
     }
-  } catch {} finally {
+  } catch (err) {
+    console.error(`[BROWSE] postConfirmWatches sweep failed: ${err.message}`);
+  } finally {
     sweepInProgress = false;
   }
 }
@@ -1002,7 +1025,9 @@ app.post('/api/browse', async (req, res) => {
   try {
     const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
     parseTransfers(raw).forEach(t => { if (t.tag) existingTags.add(t.tag); });
-  } catch {}
+  } catch (err) {
+    console.error(`[BROWSE] existingTags snapshot failed, discovery may misclassify pre-existing transfers as new: ${err.message}`);
+  }
 
   // Deliberately NOT using a global pause (-p -a) here: it was tried and caused
   // a worse bug than it solved — see the comment on postConfirmWatches below.
@@ -1038,7 +1063,9 @@ app.post('/api/browse', async (req, res) => {
       if (fresh.length > 0 && fresh.length === prevCount) { newTransfers = fresh; break; }
       prevCount = fresh.length;
       newTransfers = fresh;
-    } catch {}
+    } catch (err) {
+      console.error(`[BROWSE] discovery poll failed: ${err.message}`);
+    }
   }
 
   if (!newTransfers.length)
@@ -1072,7 +1099,7 @@ app.post('/api/browse/confirm', async (req, res) => {
   // needed here.
   const session = browseId && browseSessions.get(browseId);
   if (session) {
-    postConfirmWatches.push({ destination: session.destination, keepTags: keepSet, expiresAt: Date.now() + POST_CONFIRM_WATCH_MS });
+    registerPostConfirmWatch(session.destination, keepSet);
     browseSessions.delete(browseId);
   } else if (cancel.length) {
     // No valid session (e.g. expired) -- fall back to cancelling just the
