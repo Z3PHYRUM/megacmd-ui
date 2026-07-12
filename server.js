@@ -374,8 +374,12 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 // Runs fn over items in fixed-size concurrent batches instead of one-at-a-time,
 // so confirming/cancelling a folder with hundreds of files doesn't take one
-// docker exec round-trip per file, serially.
-async function runInBatches(items, fn, batchSize = 25) {
+// docker exec round-trip per file, serially. mega-transfers -c/-p/-r only
+// accept a single tag (confirmed via `mega-transfers --help` -- no batch/list
+// syntax), so this concurrency is the only lever available for speeding up a
+// large cleanup; the underlying mega-cmd-server daemon may still serialize
+// requests internally, so this won't scale linearly forever.
+async function runInBatches(items, fn, batchSize = 40) {
   for (let i = 0; i < items.length; i += batchSize) {
     await Promise.all(items.slice(i, i + batchSize).map(fn));
   }
@@ -1168,6 +1172,10 @@ app.post('/api/browse/confirm', async (req, res) => {
   }
 
   res.json({ success: true });
+});
+
+app.get('/api/browse/watches', (req, res) => {
+  res.json({ watches: postConfirmWatches.map(w => ({ destination: w.destination, keepCount: w.keepTags.size, expiresAt: w.expiresAt })) });
 });
 
 // ── Bookmark routes ───────────────────────────────────────────────────────────

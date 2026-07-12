@@ -810,6 +810,7 @@
           </tbody>
         </table>
       </div>
+      <div class="truncation-warn hidden" id="cleanup-notice"></div>
       <div class="truncation-warn hidden" id="truncation-warn">
         ⚠ Showing 1000 transfers — list may be truncated. Cancel or clear completed transfers to see all.
       </div>
@@ -1732,9 +1733,35 @@
       document.getElementById('truncation-warn').classList.toggle('hidden', !truncated);
       document.getElementById('refresh-hint').textContent =
         `Last updated: ${new Date().toLocaleTimeString()} · Auto-refreshes every 5 seconds`;
+      updateCleanupNotice();
     } catch (err) {
       document.getElementById('tbody').innerHTML =
         `<tr><td colspan="5" class="empty">Error: ${esc(err.message)}</td></tr>`;
+    }
+  }
+
+  // Folder-picker confirms that deselect a lot of a huge folder clean up in
+  // the background rather than blocking the UI (see /api/browse/confirm) --
+  // without this, a big leftover PAUSED batch looks indistinguishable from
+  // something stuck rather than something in progress.
+  async function updateCleanupNotice() {
+    const el = document.getElementById('cleanup-notice');
+    try {
+      const { watches } = await apiFetch('/api/browse/watches');
+      if (!watches.length) { el.classList.add('hidden'); return; }
+      let remaining = 0;
+      for (const w of watches) {
+        const prefix = w.destination.endsWith('/') ? w.destination : w.destination + '/';
+        remaining += currentTransfers.filter(t => t.status === 'paused' && t.filename?.startsWith(prefix)).length;
+      }
+      if (remaining > 0) {
+        el.textContent = `🧹 Cleaning up ~${remaining} leftover transfer${remaining !== 1 ? 's' : ''} from a recent folder selection — this can take a few minutes for a large folder.`;
+        el.classList.remove('hidden');
+      } else {
+        el.classList.add('hidden');
+      }
+    } catch {
+      el.classList.add('hidden');
     }
   }
 
