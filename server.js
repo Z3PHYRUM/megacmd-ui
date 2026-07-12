@@ -1021,16 +1021,22 @@ app.post('/api/queue/clear', (req, res) => {
 // mega-get doesn't understand the suffix at all -- it silently ignores it and
 // downloads the entire top-level shared folder instead. For a large library
 // share, that turns "give me this one subfolder" into "give me everything,"
-// repeatedly, on every re-browse.
-const SUBFOLDER_DEEPLINK_RE = /^https?:\/\/mega\.nz\/folder\/[^#]+#[^/?]+\/.+/i;
+// repeatedly, on every re-browse. Non-owners of a shared folder generally
+// can't generate a standalone link for an arbitrary subfolder within it
+// either, so the practical fix is offering the parent link instead -- the
+// picker's filter box can narrow a large folder down to what's wanted.
+const SUBFOLDER_DEEPLINK_RE = /^(https?:\/\/mega\.nz\/folder\/[^#]+#[^/?]+)\/.+/i;
 
 app.post('/api/browse', async (req, res) => {
   cleanupBrowseSessions();
   const { link, dest } = req.body;
   if (!link) return res.status(400).json({ error: 'No link provided' });
-  if (SUBFOLDER_DEEPLINK_RE.test(link.trim())) {
+  const deepLinkMatch = link.trim().match(SUBFOLDER_DEEPLINK_RE);
+  if (deepLinkMatch) {
     return res.status(400).json({
-      error: 'This link points to a subfolder within a larger shared folder (it has extra text after the key). MEGAcmd can\'t target just that subfolder -- using this link would download the entire parent folder instead. In the MEGA web app, open that specific subfolder and use its own "Get link" option to generate a standalone link for just that subfolder, then use that instead.',
+      error: 'This link points to a subfolder within a larger shared folder (it has extra text after the key). MEGAcmd can\'t target just that subfolder directly, and you generally can\'t generate your own link for a subfolder within someone else\'s share either.',
+      suggestedLink: deepLinkMatch[1],
+      suggestedLinkNote: 'Browse the entire parent folder instead, then use the filter box in the picker to find what you need.',
     });
   }
   const destination = resolveDest(dest);

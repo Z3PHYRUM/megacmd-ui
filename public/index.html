@@ -1182,9 +1182,24 @@
       .catch(err => {
         document.getElementById('browse-loading').style.display = 'none';
         const el = document.getElementById('browse-error');
-        el.innerHTML = `<div class="dl-errors-header"><span>${esc(err.message)}</span></div>`;
+        if (err.data?.suggestedLink) {
+          suggestedParentLink = err.data.suggestedLink;
+          el.innerHTML = `<div class="dl-errors-header"><span>${esc(err.message)}</span></div>
+            <div class="dl-error-item">
+              ${esc(err.data.suggestedLinkNote || '')}
+              <div style="margin-top:8px"><button class="secondary sm" onclick="browseParentInstead()">Browse Parent Folder Instead</button></div>
+            </div>`;
+        } else {
+          suggestedParentLink = null;
+          el.innerHTML = `<div class="dl-errors-header"><span>${esc(err.message)}</span></div>`;
+        }
         el.classList.remove('hidden');
       });
+  }
+
+  let suggestedParentLink = null;
+  function browseParentInstead() {
+    if (suggestedParentLink) openFolderPicker(suggestedParentLink, currentBrowseDest);
   }
 
   function renderBrowseFiles(files, dest) {
@@ -2160,7 +2175,11 @@
       ...opts,
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
+    if (!res.ok) {
+      const err = new Error(data.error || res.statusText);
+      err.data = data;
+      throw err;
+    }
     return data;
   }
 
