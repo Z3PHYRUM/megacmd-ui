@@ -26,6 +26,7 @@ const QUEUE_FILE         = path.join(DATA_DIR, 'queue.json');
 const LOG_FILE           = path.join(DATA_DIR, 'activity.log');
 const SETTINGS_FILE      = path.join(DATA_DIR, 'settings.json');
 const BOOKMARKS_FILE     = path.join(DATA_DIR, 'bookmarks.json');
+const WATCHES_FILE       = path.join(DATA_DIR, 'postConfirmWatches.json');
 const YTDLP_BIN          = process.env.YTDLP_BIN || 'yt-dlp';
 const YTDLP_OUTPUT_DIR   = process.env.YTDLP_OUTPUT_DIR || '/downloads/';
 const FS_BROWSE_ROOT     = process.env.FS_BROWSE_ROOT || '/downloads';
@@ -281,9 +282,36 @@ function cleanupBrowseSessions() {
 // discovered, individually resume only what's kept, and keep sweeping for new
 // arrivals under the same destination for a while after confirm, cancelling
 // anything that isn't a kept tag.
+// This array lived in memory only until now -- every redeploy (docker
+// compose up --build, which we've done many times over the course of
+// debugging the folder picker) silently wiped it, orphaning whatever
+// cleanup was still in flight: the paused transfers it was tracking are
+// left with nothing protecting or cancelling them, permanently, until
+// someone happens to re-browse that exact destination again. Persisting to
+// disk means a redeploy mid-cleanup picks up where it left off instead.
 const postConfirmWatches = []; // { destination: string, keepTags: Set, expiresAt: number }
 const POST_CONFIRM_WATCH_MS = 5 * 60 * 1000;
 const POST_CONFIRM_SWEEP_MS = 5000;
+
+function savePostConfirmWatches() {
+  try {
+    const serializable = postConfirmWatches.map(w => ({ destination: w.destination, keepTags: [...w.keepTags], expiresAt: w.expiresAt }));
+    fs.writeFileSync(WATCHES_FILE, JSON.stringify(serializable));
+  } catch {}
+}
+
+function loadPostConfirmWatches() {
+  try {
+    if (!fs.existsSync(WATCHES_FILE)) return;
+    const loaded = JSON.parse(fs.readFileSync(WATCHES_FILE, 'utf8'));
+    const now = Date.now();
+    for (const w of loaded) {
+      if (w.expiresAt > now) postConfirmWatches.push({ destination: w.destination, keepTags: new Set(w.keepTags), expiresAt: w.expiresAt });
+    }
+    if (postConfirmWatches.length) console.log(`[BROWSE] resumed ${postConfirmWatches.length} watch(es) from a previous run`);
+  } catch {}
+}
+loadPostConfirmWatches();
 
 // Merges into an existing watch for the same destination rather than stacking
 // a duplicate -- two independent watches for the same destination would each
@@ -298,6 +326,7 @@ function registerPostConfirmWatch(destination, keepTags) {
   } else {
     postConfirmWatches.push({ destination, keepTags: new Set(keepTags), expiresAt: Date.now() + POST_CONFIRM_WATCH_MS });
   }
+  savePostConfirmWatches();
 }
 
 // A single sweep can involve thousands of individual cancel calls for a huge
@@ -309,9 +338,11 @@ let sweepInProgress = false;
 async function sweepPostConfirmWatches() {
   if (sweepInProgress) return;
   const now = Date.now();
+  let expired = false;
   for (let i = postConfirmWatches.length - 1; i >= 0; i--) {
-    if (postConfirmWatches[i].expiresAt < now) postConfirmWatches.splice(i, 1);
+    if (postConfirmWatches[i].expiresAt < now) { postConfirmWatches.splice(i, 1); expired = true; }
   }
+  if (expired) savePostConfirmWatches();
   if (!postConfirmWatches.length) return;
 
   sweepInProgress = true;
