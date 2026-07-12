@@ -1014,10 +1014,25 @@ app.post('/api/queue/clear', (req, res) => {
 });
 
 // ── Browse routes ─────────────────────────────────────────────────────────────
+// A MEGA folder link with extra path segments after the key (e.g.
+// https://mega.nz/folder/XXXX#YYYY/folder/ZZZZ) is what the web app shows in
+// the address bar when you've navigated INTO a subfolder of a shared folder.
+// It looks like it should scope a download to just that subfolder, but
+// mega-get doesn't understand the suffix at all -- it silently ignores it and
+// downloads the entire top-level shared folder instead. For a large library
+// share, that turns "give me this one subfolder" into "give me everything,"
+// repeatedly, on every re-browse.
+const SUBFOLDER_DEEPLINK_RE = /^https?:\/\/mega\.nz\/folder\/[^#]+#[^/?]+\/.+/i;
+
 app.post('/api/browse', async (req, res) => {
   cleanupBrowseSessions();
   const { link, dest } = req.body;
   if (!link) return res.status(400).json({ error: 'No link provided' });
+  if (SUBFOLDER_DEEPLINK_RE.test(link.trim())) {
+    return res.status(400).json({
+      error: 'This link points to a subfolder within a larger shared folder (it has extra text after the key). MEGAcmd can\'t target just that subfolder -- using this link would download the entire parent folder instead. In the MEGA web app, open that specific subfolder and use its own "Get link" option to generate a standalone link for just that subfolder, then use that instead.',
+    });
+  }
   const destination = resolveDest(dest);
 
   // Snapshot existing tags so we can identify what mega-get adds
