@@ -141,11 +141,12 @@ function applyMockAction(flag, tagArg) {
 // transfers (as the folder-picker cleanup logic does) can genuinely take
 // longer than 10s against a real, large queue -- and a silent timeout there
 // aborts a folder browse or leaves its cleanup unfinished.
-// mega-ls gets a long timeout for the same reason mega-transfers does: a
-// recursive listing of a large shared folder is a lot of round-trips, and a
-// silent timeout would look like "this MEGAcmd can't list links" and
-// permanently demote us to the slower queue-based discovery.
-const EXEC_TIMEOUT = { default: 10000, 'mega-get': 0, 'mega-transfers': 45000, 'mega-ls': 45000 };  // 0 = no timeout
+// mega-ls sits in front of every folder browse, and its timeout is paid in full
+// whenever the command hangs rather than failing fast -- on top of the 30s
+// discovery that follows. Kept well under mega-transfers' allowance for that
+// reason: a listing that hasn't started answering by then isn't the fast path
+// anyway, and falling back costs correctness nothing.
+const EXEC_TIMEOUT = { default: 10000, 'mega-get': 0, 'mega-transfers': 45000, 'mega-ls': 20000 };  // 0 = no timeout
 
 function dockerExec(megaCommand, args = []) {
   if (MOCK) {
@@ -371,6 +372,45 @@ function formatBytes(bytes) {
 
 function resolveDest(dest) {
   return (typeof dest === 'string' && dest.trim()) ? dest.trim() : '/downloads/';
+}
+
+// MEGAcmd runs inside the megacmd container, so the destination has to exist and
+// be writable THERE -- not in megacmd-ui, which is where the Destination
+// "Browse…" picker lists from. It's easy to have the volume mounted on one and
+// not the other, and the failure is brutal to diagnose: mega-get exits
+// immediately with a bare "Write error" naming no path, so the folder picker
+// sees zero transfers appear and times out. That is indistinguishable from an
+// empty folder, and used to be reported as "quota exceeded, link invalid, or
+// folder is empty" after a 75-second wait. Checking first turns that into an
+// immediate, specific answer.
+const destChecks = new Map(); // destination -> { ok, detail, checkedAt }
+const DEST_CHECK_TTL_MS = 60 * 1000;
+
+async function checkDestinationWritable(destination) {
+  const cached = destChecks.get(destination);
+  if (cached && Date.now() - cached.checkedAt < DEST_CHECK_TTL_MS) return cached;
+
+  let result;
+  try {
+    await dockerExec('/bin/sh', ['-c',
+      'mkdir -p "$1" 2>/dev/null; ' +
+      '[ -d "$1" ] || { echo "it does not exist and could not be created"; exit 1; }; ' +
+      'touch "$1/.megacmd-ui-write-test" 2>/dev/null || { echo "the directory exists but is not writable"; exit 1; }; ' +
+      'rm -f "$1/.megacmd-ui-write-test"',
+      'sh', destination]);
+    result = { ok: true, detail: '', checkedAt: Date.now() };
+  } catch (err) {
+    result = { ok: false, detail: err.message.trim().split('\n').pop(), checkedAt: Date.now() };
+  }
+  destChecks.set(destination, result);
+  if (!result.ok) console.error(`[DEST] ${MEGACMD_CONTAINER} cannot write to ${destination}: ${result.detail}`);
+  return result;
+}
+
+function destinationErrorMessage(destination, detail) {
+  return `The "${MEGACMD_CONTAINER}" container can't write to ${destination} — ${detail}. `
+    + `MEGAcmd runs inside that container, so the destination must exist and be writable there, not just in megacmd-ui. `
+    + `Check it with:  docker exec ${MEGACMD_CONTAINER} touch ${destination}/.probe`;
 }
 
 function normalizeAria2Status(s) {
@@ -713,6 +753,11 @@ function cleanMegaError(raw) {
   if (/error code:\s*Incomplete/i.test(raw) && /100\.00\s*%/.test(raw))
     return 'Download complete (MEGAcmd reported incomplete — verify files)';
 
+  // MEGAcmd names neither the path nor the reason here, and this is almost
+  // always the destination volume missing or unwritable inside its container.
+  if (/write error/i.test(raw))
+    return `Write error — MEGAcmd couldn't write to the destination. It runs inside the "${MEGACMD_CONTAINER}" container, so check the download volume is mounted and writable there: docker exec ${MEGACMD_CONTAINER} touch /downloads/.probe`;
+
   if (/bandwidth quota/i.test(raw)) {
     const match = raw.match(/try again in (\d+) hour/i);
     const hours = match ? parseInt(match[1]) : null;
@@ -880,6 +925,13 @@ app.post('/api/download', async (req, res) => {
     return res.status(400).json({ error: 'No links provided' });
 
   const destination = resolveDest(dest);
+
+  // Same check the folder picker does -- a single-file link hits the identical
+  // wall, just with a less confusing error, and there's no point queueing a
+  // dozen links only to have each fail the same way.
+  const destCheck = await checkDestinationWritable(destination);
+  if (!destCheck.ok) return res.status(500).json({ error: destinationErrorMessage(destination, destCheck.detail) });
+
   const results = [];
 
   for (const rawLink of links) {
@@ -1196,6 +1248,9 @@ app.post('/api/browse', async (req, res) => {
   }
   const cleanLink = link.trim();
   const destination = resolveDest(dest);
+
+  const destCheck = await checkDestinationWritable(destination);
+  if (!destCheck.ok) return res.status(500).json({ error: destinationErrorMessage(destination, destCheck.detail) });
 
   const session = {
     id: queueId(),

@@ -161,6 +161,25 @@ The parser reads the header row dynamically, so as long as the columns include T
 
 Check the link for extra text after the key, like `https://mega.nz/folder/XXXX#YYYY/folder/ZZZZ`. That's what the MEGA web app shows in the address bar when you've navigated *into* a subfolder of a shared folder — it looks like a link to just that subfolder, but `mega-get` doesn't understand the suffix and silently ignores it, downloading the entire top-level shared folder instead. The app now detects this link shape before it can happen and offers a "Browse Parent Folder Instead" button in the picker's error message — it resubmits with just the base link (stripped back to the key) and discovers the whole parent folder, which you can then narrow down with the picker's filter box. This is usually the only option: if you don't own the shared folder, MEGA generally won't let you generate your own link scoped to an arbitrary subfolder within someone else's share either.
 
+### "Write error", or the folder picker reports an empty folder for a link you know is good
+
+MEGAcmd runs inside the **`megacmd`** container, so the destination has to exist and be writable *there*. It's easy to have the downloads volume mounted on `megacmd-ui` (which is what the Destination "Browse…" picker lists from) but not on `megacmd`, or mounted read-only, or owned by a UID MEGAcmd isn't running as.
+
+When that happens `mega-get` exits immediately with a bare `Write error` that names neither the path nor the reason. From the folder picker's side that is indistinguishable from an empty folder — no transfers ever appear, so discovery just times out. Earlier versions reported it as "quota exceeded, link invalid, or folder is empty" after a ~75-second wait, which sent debugging in entirely the wrong direction.
+
+The destination is now checked before any download or browse starts, so this fails immediately with a specific message. To confirm it by hand:
+
+```bash
+docker inspect megacmd --format '{{range .Mounts}}{{.Source}} -> {{.Destination}} (rw={{.RW}}){{println}}{{end}}'
+docker exec megacmd touch /downloads/.probe && echo WRITABLE || echo "NOT WRITABLE"
+docker exec megacmd rm -f /downloads/.probe
+docker exec megacmd id            # who MEGAcmd runs as
+docker exec megacmd ls -ld /downloads
+docker exec megacmd df -h /downloads   # a full disk shows up as a write error too
+```
+
+The fix is on the `megacmd` container, not this app: give it the same downloads mount `megacmd-ui` has (e.g. `/mnt/media1/downloads:/downloads`), read-write, with ownership matching the user MEGAcmd runs as.
+
 ### How the folder picker discovers a folder (and which mode yours is using)
 
 There are two discovery modes. Check `docker logs megacmd-ui` after opening a picker to see which one your MEGAcmd supports:
