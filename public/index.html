@@ -287,6 +287,19 @@
       padding: 7px 11px;
     }
     .truncation-warn.hidden { display: none; }
+    /* Louder than truncation-warn on purpose: this one means nothing is
+       downloading and nothing will, until it's acted on. */
+    .pause-warn {
+      background: rgba(255,85,85,.14);
+      border: 1px solid rgba(255,85,85,.45);
+      border-radius: 6px;
+      color: #ff8f8f;
+      font-size: 13px;
+      line-height: 1.5;
+      margin-top: 10px;
+      padding: 9px 12px;
+    }
+    .pause-warn.hidden { display: none; }
 
     /* ── Retry queue ── */
     .countdown { color: var(--muted); font-size: 12px; margin-left: auto; }
@@ -809,6 +822,12 @@
             <tr><td colspan="5" class="empty">Loading transfers…</td></tr>
           </tbody>
         </table>
+      </div>
+      <div class="pause-warn hidden" id="global-pause-warn">
+        ⏸ <strong>MEGAcmd is globally paused</strong> — every transfer below will sit at
+        <em>queued</em> forever until it's resumed. This is a MEGAcmd-wide setting, not a
+        per-transfer one, so the per-row Resume buttons won't clear it.
+        <button class="sm" id="global-resume-btn" style="margin-left:8px">Resume MEGAcmd</button>
       </div>
       <div class="truncation-warn hidden" id="cleanup-notice"></div>
       <div class="truncation-warn hidden" id="truncation-warn">
@@ -1737,10 +1756,25 @@
     transferAction(btn.dataset.action, btn.dataset.tag);
   });
 
+  // "-r -a" is the only thing that clears a MEGAcmd-wide pause. It's safe here
+  // in a way it explicitly is not inside the folder picker: there, resuming
+  // everything is what caused the original over-download bug. Here the user is
+  // looking at the queue and asking for exactly this.
+  document.getElementById('global-resume-btn').addEventListener('click', async () => {
+    try {
+      await apiFetch('/api/transfers/resume', { method: 'POST', body: JSON.stringify({ tag: 'all' }) });
+      toast('Resumed MEGAcmd — transfers should start shortly', 'success');
+      loadTransfers();
+    } catch (err) {
+      toast(`Couldn't resume: ${err.message}`, 'error');
+    }
+  });
+
   async function loadTransfers() {
     try {
-      const { transfers, truncated } = await apiFetch('/api/transfers');
+      const { transfers, truncated, globallyPaused } = await apiFetch('/api/transfers');
       renderTransfers(transfers);
+      document.getElementById('global-pause-warn').classList.toggle('hidden', !globallyPaused);
       document.getElementById('truncation-warn').classList.toggle('hidden', !truncated);
       document.getElementById('refresh-hint').textContent =
         `Last updated: ${new Date().toLocaleTimeString()} · Auto-refreshes every 5 seconds`;

@@ -643,8 +643,26 @@ function mapHeaders(headers) {
   });
 }
 
+// MEGAcmd prints free-text status banners above the table, and the row parsers
+// drop every line that isn't a data row. The most important one it was throwing
+// away is "DOWNLOADS AND UPLOADS ARE PAUSED" -- the difference between "queued,
+// waiting its turn" and "queued, and nothing will ever start". Without it a
+// globally-paused queue renders as a screen of QUEUED rows at 0% with no
+// explanation, indistinguishable from a quota stall. Earlier versions of this
+// app issued `mega-transfers -p -a` themselves, so a leftover global pause is a
+// state it could get into on its own and then be unable to report.
+function parseTransferNotices(raw) {
+  return raw.split('\n')
+    .map(l => l.trim())
+    .filter(l => l && !l.includes('|') && !/^-{3,}$/.test(l) && !/^(DIR|TAG|TYPE|FLAGS)\b/i.test(l));
+}
+
+function detectGlobalPause(raw) {
+  return parseTransferNotices(raw).some(n => /\bpaused\b/i.test(n));
+}
+
 function parsePipeTransfers(raw) {
-  // Skip status/warning lines (e.g. "DOWNLOADS AND UPLOADS ARE PAUSED") — keep only pipe rows
+  // Keep only pipe rows; banners are read separately by parseTransferNotices.
   const lines = raw.split('\n').map(l => l.trim()).filter(l => l && l.includes('|'));
   if (lines.length < 2) return [];
 
@@ -962,9 +980,14 @@ app.get('/api/transfers', async (req, res) => {
   try {
     const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_LIMIT}`, '--col-separator=|']);
     const transfers = parseTransfers(raw);
-    res.json({ transfers, truncated: transfers.length >= TRANSFER_LIMIT });
+    res.json({
+      transfers,
+      truncated: transfers.length >= TRANSFER_LIMIT,
+      globallyPaused: detectGlobalPause(raw),
+      notices: parseTransferNotices(raw),
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message, transfers: [], truncated: false });
+    res.status(500).json({ error: err.message, transfers: [], truncated: false, globallyPaused: false, notices: [] });
   }
 });
 
