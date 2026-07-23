@@ -26,7 +26,17 @@ const QUEUE_FILE         = path.join(DATA_DIR, 'queue.json');
 const LOG_FILE           = path.join(DATA_DIR, 'activity.log');
 const SETTINGS_FILE      = path.join(DATA_DIR, 'settings.json');
 const BOOKMARKS_FILE     = path.join(DATA_DIR, 'bookmarks.json');
-const WATCHES_FILE       = path.join(DATA_DIR, 'postConfirmWatches.json');
+// Written by a previous version's destination-scoped cleanup sweep. That sweep
+// is gone (see the browse section), but its state file survives a redeploy, so
+// delete any leftover rather than leaving a stale file people find and wonder
+// about.
+const LEGACY_WATCHES_FILE = path.join(DATA_DIR, 'postConfirmWatches.json');
+try {
+  if (fs.existsSync(LEGACY_WATCHES_FILE)) {
+    fs.unlinkSync(LEGACY_WATCHES_FILE);
+    console.log('[BROWSE] removed obsolete postConfirmWatches.json from a previous version');
+  }
+} catch {}
 const YTDLP_BIN          = process.env.YTDLP_BIN || 'yt-dlp';
 const YTDLP_OUTPUT_DIR   = process.env.YTDLP_OUTPUT_DIR || '/downloads/';
 const FS_BROWSE_ROOT     = process.env.FS_BROWSE_ROOT || '/downloads';
@@ -130,16 +140,22 @@ function applyMockAction(flag, tagArg) {
 // mega-transfers gets a longer timeout than the default: listing thousands of
 // transfers (as the folder-picker cleanup logic does) can genuinely take
 // longer than 10s against a real, large queue -- and a silent timeout there
-// means postConfirmWatches' cleanup sweep fails every single cycle forever,
-// leaving unwanted transfers paused indefinitely instead of cancelled.
-const EXEC_TIMEOUT = { default: 10000, 'mega-get': 0, 'mega-transfers': 45000 };  // 0 = no timeout
+// aborts a folder browse or leaves its cleanup unfinished.
+// mega-ls gets a long timeout for the same reason mega-transfers does: a
+// recursive listing of a large shared folder is a lot of round-trips, and a
+// silent timeout would look like "this MEGAcmd can't list links" and
+// permanently demote us to the slower queue-based discovery.
+const EXEC_TIMEOUT = { default: 10000, 'mega-get': 0, 'mega-transfers': 45000, 'mega-ls': 45000 };  // 0 = no timeout
 
 function dockerExec(megaCommand, args = []) {
   if (MOCK) {
     console.log(`[MOCK] ${megaCommand} ${args.join(' ')}`);
     if (megaCommand === 'mega-whoami') return Promise.resolve('user@example.com');
     if (megaCommand === 'mega-get') {
-      const link = args[0] || '';
+      // Real callers pass flags first (-q, --ignore-quota-warn), so take the
+      // first non-flag argument as the link -- otherwise mock rows come out
+      // named "--ignore-quota-warn".
+      const link = args.find(a => !a.startsWith('-')) || '';
       mockTransfers.push({
         tag: String(Date.now()).slice(-4),
         type: '⇓',
@@ -155,6 +171,10 @@ function dockerExec(megaCommand, args = []) {
       }
       return Promise.resolve(mockTransfersOutput());
     }
+    // Mock the "this MEGAcmd can't list a public link" case, so local dev
+    // exercises the queue-based discovery fallback (which the mock does model)
+    // rather than a listing path it can't meaningfully fake.
+    if (megaCommand === 'mega-ls') return Promise.reject(new Error("Couldn't find (mock)"));
     // Simulates /api/browse's backgrounded "mega-get ... &" folder-discovery trick
     // (args: -c, script, sh, link, destination) so the folder picker is testable
     // without a real MEGAcmd container.
@@ -254,12 +274,29 @@ const TORRENT_METADATA_TIMEOUT_MS = 30000;
 const TORRENT_METADATA_POLL_MS    = 700;
 const BROWSE_DISCOVERY_TIMEOUT_MS = 30000;
 
-// Tracks the tag snapshot taken right before a folder browse started, so
-// /api/browse/confirm can identify and cancel "straggler" transfers that
-// MEGAcmd kept discovering after the picker's discovery window gave up —
-// without this, a folder too large to fully enumerate in time could leave
-// leftover transfers the user never saw and never explicitly chose.
-const browseSessions = new Map(); // browseId -> { existingTags: Set, destination: string, createdAt: number }
+// ── Folder picker state ───────────────────────────────────────────────────────
+// THE INVARIANT: the folder picker may only ever cancel a transfer that it
+// itself created, in a session it still owns. It must never decide what to
+// cancel by looking at where a transfer is being saved.
+//
+// This is not a style preference -- violating it is what broke the app. The
+// previous design registered a 5-minute "watch" on the *destination path* and
+// swept every 5s, cancelling any transfer under that path not on an allow-list.
+// Because every downloader here shares one destination (default /downloads/),
+// that watch's blast radius was every MEGA transfer in the system:
+//   * a new browse had its freshly-discovered transfers cancelled within 5s,
+//     so discovery saw zero files and reported "quota exceeded or empty folder"
+//     -- blaming MEGA for our own cleanup job;
+//   * closing the picker sent keep:[], registering a watch with an EMPTY
+//     allow-list, and every attempt refreshed its expiry, so the failure state
+//     renewed itself for as long as you kept trying;
+//   * a folder still downloading when a later watch replaced the earlier one
+//     was no longer on any allow-list, so it was cancelled mid-download.
+// It was also persisted to disk, so redeploying carried the breakage forward.
+//
+// Sessions below are in-memory only and hold an explicit ownedTags set. Nothing
+// outside that set is ever a candidate for cancellation.
+const browseSessions = new Map(); // browseId -> BrowseSession
 const BROWSE_SESSION_TTL_MS = 60 * 60 * 1000;
 
 function cleanupBrowseSessions() {
@@ -269,106 +306,12 @@ function cleanupBrowseSessions() {
   }
 }
 
-// mega-get's background discovery for a huge folder can keep adding transfers
-// to MEGAcmd's queue for minutes after /api/browse/confirm has already
-// returned -- well past both the discovery window and the one-time straggler
-// sweep at confirm time. A previous version of this handled that by pausing
-// everything globally during discovery and clearing the global pause on
-// confirm; that turned out to be the actual bug (confirmed live: selecting 1
-// file out of a huge folder resulted in ~999 others being resumed too),
-// because "clear the global pause" resumes *everything* currently paused —
-// including stragglers that arrived after the one-time sweep ran. So instead:
-// never touch pause/resume in bulk. Individually pause each transfer as it's
-// discovered, individually resume only what's kept, and keep sweeping for new
-// arrivals under the same destination for a while after confirm, cancelling
-// anything that isn't a kept tag.
-// This array lived in memory only until now -- every redeploy (docker
-// compose up --build, which we've done many times over the course of
-// debugging the folder picker) silently wiped it, orphaning whatever
-// cleanup was still in flight: the paused transfers it was tracking are
-// left with nothing protecting or cancelling them, permanently, until
-// someone happens to re-browse that exact destination again. Persisting to
-// disk means a redeploy mid-cleanup picks up where it left off instead.
-const postConfirmWatches = []; // { destination: string, keepTags: Set, expiresAt: number }
-const POST_CONFIRM_WATCH_MS = 5 * 60 * 1000;
-const POST_CONFIRM_SWEEP_MS = 5000;
-
-function savePostConfirmWatches() {
-  try {
-    const serializable = postConfirmWatches.map(w => ({ destination: w.destination, keepTags: [...w.keepTags], expiresAt: w.expiresAt }));
-    fs.writeFileSync(WATCHES_FILE, JSON.stringify(serializable));
-  } catch {}
-}
-
-function loadPostConfirmWatches() {
-  try {
-    if (!fs.existsSync(WATCHES_FILE)) return;
-    const loaded = JSON.parse(fs.readFileSync(WATCHES_FILE, 'utf8'));
-    const now = Date.now();
-    for (const w of loaded) {
-      if (w.expiresAt > now) postConfirmWatches.push({ destination: w.destination, keepTags: new Set(w.keepTags), expiresAt: w.expiresAt });
-    }
-    if (postConfirmWatches.length) console.log(`[BROWSE] resumed ${postConfirmWatches.length} watch(es) from a previous run`);
-  } catch {}
-}
-loadPostConfirmWatches();
-
-// Merges into an existing watch for the same destination rather than stacking
-// a duplicate -- two independent watches for the same destination would each
-// cancel anything outside *their own* keepTags, so a second confirm on the
-// same folder within the watch window could have the first watch cancel the
-// second one's just-kept file (and vice versa).
-function registerPostConfirmWatch(destination, keepTags) {
-  const existing = postConfirmWatches.find(w => w.destination === destination);
-  if (existing) {
-    keepTags.forEach(t => existing.keepTags.add(t));
-    existing.expiresAt = Date.now() + POST_CONFIRM_WATCH_MS;
-  } else {
-    postConfirmWatches.push({ destination, keepTags: new Set(keepTags), expiresAt: Date.now() + POST_CONFIRM_WATCH_MS });
-  }
-  savePostConfirmWatches();
-}
-
-// A single sweep can involve thousands of individual cancel calls for a huge
-// folder and take a while -- this guard skips overlapping ticks rather than
-// letting two sweeps race on the same tags, and the interval effectively
-// becomes "sweep again as soon as the last one finishes" for a big backlog.
-let sweepInProgress = false;
-
-async function sweepPostConfirmWatches() {
-  if (sweepInProgress) return;
-  const now = Date.now();
-  let expired = false;
-  for (let i = postConfirmWatches.length - 1; i >= 0; i--) {
-    if (postConfirmWatches[i].expiresAt < now) { postConfirmWatches.splice(i, 1); expired = true; }
-  }
-  if (expired) savePostConfirmWatches();
-  if (!postConfirmWatches.length) return;
-
-  sweepInProgress = true;
-  try {
-    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
-    const transfers = parseTransfers(raw);
-    for (const watch of postConfirmWatches) {
-      const prefix = watch.destination.endsWith('/') ? watch.destination : watch.destination + '/';
-      const stragglerTags = transfers
-        .filter(t => t.tag && t.filename?.startsWith(prefix) && !watch.keepTags.has(t.tag))
-        .map(t => t.tag);
-      // No verify-and-retry here -- each sweep cycle re-discovers whatever's
-      // still present and retries it, so the periodic nature of this loop is
-      // itself the retry mechanism, without an extra query per sweep.
-      if (stragglerTags.length) {
-        console.log(`[BROWSE] sweeping ${stragglerTags.length} straggler(s) under ${watch.destination}`);
-        await runInBatches(stragglerTags, tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {}));
-      }
-    }
-  } catch (err) {
-    console.error(`[BROWSE] postConfirmWatches sweep failed: ${err.message}`);
-  } finally {
-    sweepInProgress = false;
-  }
-}
-setInterval(sweepPostConfirmWatches, POST_CONFIRM_SWEEP_MS);
+// Aggregate progress across however many cancel jobs are in flight, so the UI
+// can show real numbers instead of a wall of PAUSED rows that looks identical
+// to "stuck". Counted rather than stored per-job because a confirm and a
+// dismiss can overlap, and a single shared object would have whichever
+// finished first report the other as done.
+let cleanupJobs = 0, cleanupTotal = 0, cleanupDone = 0;
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -414,6 +357,16 @@ async function aria2AddMagnetForBrowse(magnetLink, dir) {
 function basename(p) {
   if (!p) return '';
   return p.split('/').filter(Boolean).pop() || '';
+}
+
+// Matches the "4.70 GB" shape MEGAcmd prints, so sizes read the same whether a
+// row came from mega-ls (raw bytes) or mega-transfers (pre-formatted).
+function formatBytes(bytes) {
+  if (!bytes) return '';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let n = bytes, i = 0;
+  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  return `${i === 0 ? n : n.toFixed(2)} ${units[i]}`;
 }
 
 function resolveDest(dest) {
@@ -1062,6 +1015,173 @@ app.post('/api/queue/clear', (req, res) => {
 // picker's filter box can narrow a large folder down to what's wanted.
 const SUBFOLDER_DEEPLINK_RE = /^(https?:\/\/mega\.nz\/folder\/[^#]+#[^/?]+)\/.+/i;
 
+// ── Discovery strategy 1: list the folder without touching the queue ──────────
+// MEGA's UserGuide defines a "remotepath" as "a file or a folder stored in your
+// MEGA account, OR a publicly available file or folder in the MEGA cloud", which
+// implies `ls` accepts a folder link -- but it shows no example of it, and a
+// previous test here reported "Couldn't find". That test ran during the same
+// session the subfolder-deeplink bug was found, so it may well have been run
+// against a deeplink URL, which fails for an unrelated reason. Rather than
+// settle it by assumption, probe it at runtime and fall back if it doesn't work.
+//
+// Listing alone isn't enough to be useful: to download only the picked files we
+// must also be able to address ONE file inside the link. That is not documented
+// anywhere, and this project already established that mega-get silently ignores
+// a `/folder/<handle>` suffix and grabs the whole share instead. So both
+// capabilities are probed, with `ls` (which cannot start a transfer) rather than
+// by trying a `get` and seeing what happens -- a failed get probe would BE the
+// over-download bug.
+const linkListingSupport = new Map(); // link -> boolean, avoids re-probing per browse
+
+// `ls -R` prints a block per directory: a header line ending in ':' giving that
+// directory's path, then its entries, then a blank line. With -l each entry is
+// prefixed by a FLAGS/VERS/SIZE/DATE column set; without it, an entry is just a
+// bare name. Both are handled, because which one a given MEGAcmd build emits
+// (and whether it honours -l against a public link at all) is not something the
+// UserGuide pins down.
+function parseLsRecursive(raw) {
+  const files = [];
+  const dirs = new Set();
+  let cwd = '';
+
+  for (const rawLine of raw.split('\n')) {
+    const line = rawLine.trim();
+    if (!line) continue;
+    if (/^FLAGS\b/i.test(line)) continue;                 // long-format column header
+    if (/^-{3,}$/.test(line)) continue;
+
+    const dirHeader = line.match(/^(.*):$/);
+    if (dirHeader) {
+      cwd = dirHeader[1].trim().replace(/^\/+/, '').replace(/\/+$/, '');
+      dirs.add(cwd);
+      continue;
+    }
+
+    // Long format: flags, then optional VERS, then size (digits, or '-' for a
+    // directory), then a timestamp, then the name -- which may contain spaces,
+    // so it's "everything after the timestamp" rather than a fixed field.
+    const long = line.match(/^([-d][-a-z]*)\s+.*?(\d+|-)\s+\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+(.+)$/i);
+    if (long) {
+      if (long[1][0] === 'd') continue;                   // re-listed as its own block
+      const name = long[3].trim();
+      files.push({ rel: cwd ? `${cwd}/${name}` : name, size: Number(long[2]) || 0 });
+      continue;
+    }
+
+    // Short format: a bare name, with no way to tell a file from a directory.
+    // Directories are filtered out below by matching them against the block
+    // headers, every one of which is re-listed under -R.
+    files.push({ rel: cwd ? `${cwd}/${line}` : line, size: 0 });
+  }
+
+  return files.filter(f => !dirs.has(f.rel));
+}
+
+function stripLeadingSegments(rel, n) {
+  return n ? rel.split('/').slice(n).join('/') : rel;
+}
+
+async function tryListFolderLink(link) {
+  if (linkListingSupport.get(link) === false) return null;
+
+  let raw;
+  try {
+    raw = await dockerExec('mega-ls', ['-R', '-l', link]);
+  } catch (err) {
+    console.log(`[BROWSE] mega-ls can't list this link (${err.message.split('\n')[0]}) — using queue-based discovery`);
+    linkListingSupport.set(link, false);
+    return null;
+  }
+
+  const files = parseLsRecursive(raw);
+  if (!files.length) {
+    console.log(`[BROWSE] mega-ls returned output we couldn't parse into a file list — using queue-based discovery. Raw sample:\n${raw.slice(0, 800)}`);
+    linkListingSupport.set(link, false);
+    return null;
+  }
+
+  // A listing we can't act on is worse than none: it would show a picker whose
+  // selections could only be honoured by downloading the whole folder. So prove
+  // a single file inside the link is addressable before trusting the listing --
+  // and prove it with `ls`, which cannot start a transfer. Probing with a `get`
+  // and seeing what happened would BE the over-download bug.
+  //
+  // Whether the listing's paths are relative to the link root or include the
+  // shared folder's own name as a first segment depends on what mega-ls prints
+  // as its block headers, so try both readings rather than assume one.
+  for (const strip of [0, 1]) {
+    const probe = stripLeadingSegments(files[0].rel, strip);
+    if (!probe) continue;
+    try {
+      await dockerExec('mega-ls', ['-l', `${link}/${probe}`]);
+    } catch {
+      continue;
+    }
+    const rebased = files
+      .map(f => ({ rel: stripLeadingSegments(f.rel, strip), size: f.size }))
+      .filter(f => f.rel);
+    linkListingSupport.set(link, true);
+    console.log(`[BROWSE] listed ${rebased.length} file(s) via mega-ls without touching the transfer queue`);
+    return rebased;
+  }
+
+  console.log('[BROWSE] mega-ls listed the folder but no individual file inside it was addressable — using queue-based discovery');
+  linkListingSupport.set(link, false);
+  return null;
+}
+
+// ── Discovery strategy 2: enqueue, then cancel exactly what we enqueued ───────
+// The fallback when the link can't be listed. mega-get is the only way to learn
+// a public folder's contents, so the queue is used as the listing -- but every
+// tag it produces is recorded in the session, and cleanup may only ever touch
+// that recorded set.
+async function snapshotTags() {
+  const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
+  return parseTransfers(raw);
+}
+
+async function discoverByEnqueueing(link, destination, session) {
+  // Capture mega-get's own stderr instead of discarding it. Discarding it is why
+  // a failure here could only be reported as a guess ("quota exceeded, link
+  // invalid, or folder is empty") -- the real reason had already been thrown
+  // away. $1/$2/$3 positional params avoid shell injection.
+  const logPath = `/tmp/megacmd-ui-browse-${session.id}.log`;
+  await dockerExec('/bin/sh', [
+    '-c', 'mega-get --ignore-quota-warn "$1" "$2" > "$3" 2>&1 &',
+    'sh', link, destination, logPath,
+  ]);
+  session.logPath = logPath;
+
+  // Poll until the count stabilises across two consecutive polls, pausing each
+  // newly-seen transfer immediately so nothing downloads before it's picked.
+  let found = [], prevCount = -1;
+  const deadline = Date.now() + BROWSE_DISCOVERY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await sleep(700);
+    try {
+      const fresh = (await snapshotTags()).filter(t => t.tag && !session.existingTags.has(t.tag));
+      const newlyFound = fresh.filter(t => !session.ownedTags.has(t.tag));
+      newlyFound.forEach(t => session.ownedTags.add(t.tag));
+      if (newlyFound.length) {
+        runInBatches(newlyFound.map(t => t.tag), tag => dockerExec('mega-transfers', ['-p', tag]).catch(() => {})).catch(() => {});
+      }
+      if (fresh.length > 0 && fresh.length === prevCount) { found = fresh; break; }
+      prevCount = fresh.length;
+      found = fresh;
+    } catch (err) {
+      console.error(`[BROWSE] discovery poll failed: ${err.message}`);
+    }
+  }
+  return found;
+}
+
+// What mega-get actually said, for when discovery came up empty.
+async function readBrowseLog(session) {
+  if (!session.logPath) return '';
+  try { return (await dockerExec('/bin/cat', [session.logPath])).trim(); }
+  catch { return ''; }
+}
+
 app.post('/api/browse', async (req, res) => {
   cleanupBrowseSessions();
   const { link, dest } = req.body;
@@ -1074,108 +1194,197 @@ app.post('/api/browse', async (req, res) => {
       suggestedLinkNote: 'Browse the entire parent folder instead, then use the filter box in the picker to find what you need.',
     });
   }
+  const cleanLink = link.trim();
   const destination = resolveDest(dest);
 
-  // Snapshot existing tags so we can identify what mega-get adds
-  let existingTags = new Set();
-  try {
-    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
-    parseTransfers(raw).forEach(t => { if (t.tag) existingTags.add(t.tag); });
-  } catch (err) {
-    console.error(`[BROWSE] existingTags snapshot failed, discovery may misclassify pre-existing transfers as new: ${err.message}`);
-  }
+  const session = {
+    id: queueId(),
+    link: cleanLink,
+    destination,
+    mode: 'list',
+    ownedTags: new Set(),
+    existingTags: new Set(),
+    createdAt: Date.now(),
+  };
 
-  // Deliberately NOT using a global pause (-p -a) here: it was tried and caused
-  // a worse bug than it solved — see the comment on postConfirmWatches below.
-  // We rely solely on the eager per-tag pause in the discovery loop.
+  // Preferred path: a real listing. Costs nothing and creates no transfers.
+  const listed = await tryListFolderLink(cleanLink);
+  let files;
 
-  // Background mega-get so it returns immediately after telling the daemon to queue the folder.
-  // $1/$2 positional params avoid shell injection.
-  try {
-    await dockerExec('/bin/sh', ['-c', 'mega-get --ignore-quota-warn "$1" "$2" > /dev/null 2>&1 &', 'sh', link, destination]);
-  } catch (err) {
-    return res.status(500).json({ error: cleanMegaError(err.message) });
-  }
-
-  // Poll until the transfer count stabilises (no new entries for two consecutive polls) or the
-  // deadline elapses, pausing each newly-discovered transfer immediately as a safety net.
-  let newTransfers = [], prevCount = -1;
-  const pausedTags = new Set();
-  const deadline = Date.now() + BROWSE_DISCOVERY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, 700));
+  if (listed) {
+    files = listed.map(f => ({ id: f.rel, rel: f.rel, total: f.size ? formatBytes(f.size) : '' }));
+  } else {
+    session.mode = 'queue';
     try {
-      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
-      const fresh = parseTransfers(raw).filter(t => t.tag && !existingTags.has(t.tag));
-      const newlyFound = fresh.filter(t => !pausedTags.has(t.tag));
-      newlyFound.forEach(t => pausedTags.add(t.tag));
-      if (newlyFound.length) {
-        // Fire-and-forget so a big batch doesn't delay the next poll tick, but
-        // bounded concurrency (not one unbounded burst per tick) so a folder
-        // discovering hundreds of files at once doesn't overwhelm docker exec
-        // and silently drop some pause commands.
-        runInBatches(newlyFound.map(t => t.tag), tag => dockerExec('mega-transfers', ['-p', tag]).catch(() => {})).catch(() => {});
-      }
-      if (fresh.length > 0 && fresh.length === prevCount) { newTransfers = fresh; break; }
-      prevCount = fresh.length;
-      newTransfers = fresh;
+      const snapshot = await snapshotTags();
+      snapshot.forEach(t => { if (t.tag) session.existingTags.add(t.tag); });
     } catch (err) {
-      console.error(`[BROWSE] discovery poll failed: ${err.message}`);
+      // Proceeding blind would let cleanup mistake a pre-existing transfer for
+      // one of ours, so refuse rather than risk cancelling someone's download.
+      return res.status(500).json({ error: `Couldn't read the current transfer list, so the folder picker can't safely tell its own transfers apart from existing ones: ${cleanMegaError(err.message)}` });
     }
+
+    let discovered;
+    try {
+      discovered = await discoverByEnqueueing(cleanLink, destination, session);
+    } catch (err) {
+      return res.status(500).json({ error: cleanMegaError(err.message) });
+    }
+
+    if (!discovered.length) {
+      // Cancel anything we did manage to create before giving up, so a failed
+      // browse never leaves transfers behind.
+      if (session.ownedTags.size) await cancelTags([...session.ownedTags]);
+      const megaSaid = await readBrowseLog(session);
+      return res.status(500).json({
+        error: megaSaid
+          ? cleanMegaError(megaSaid)
+          : `MEGAcmd accepted the link but no files appeared within ${BROWSE_DISCOVERY_TIMEOUT_MS / 1000}s. The folder may be empty, or enumeration may be slower than the timeout — try again.`,
+      });
+    }
+
+    const prefix = destination.endsWith('/') ? destination : destination + '/';
+    files = discovered.map(t => ({
+      id: t.tag,
+      rel: t.filename.startsWith(prefix) ? t.filename.slice(prefix.length) : t.filename,
+      total: t.total || '',
+    }));
   }
 
-  if (!newTransfers.length)
-    return res.status(500).json({ error: 'No files found — quota exceeded, link invalid, or folder is empty' });
-
-  const browseId = queueId();
-  browseSessions.set(browseId, { existingTags, destination, createdAt: Date.now() });
-
-  logActivity('BROWSE', link, `${newTransfers.length} file(s) found`);
-  res.json({ files: newTransfers, dest: destination, browseId });
+  browseSessions.set(session.id, session);
+  logActivity('BROWSE', cleanLink, `${files.length} file(s) found via ${session.mode === 'list' ? 'mega-ls' : 'queue discovery'}`);
+  res.json({ files, dest: destination, browseId: session.id, mode: session.mode });
 });
+
+async function cancelTags(tags) {
+  if (!tags.length) return;
+  cleanupJobs++;
+  cleanupTotal += tags.length;
+  try {
+    await runInBatches(tags, async tag => {
+      await dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {});
+      cleanupDone++;
+    });
+  } finally {
+    if (--cleanupJobs === 0) { cleanupTotal = 0; cleanupDone = 0; }
+  }
+}
 
 app.post('/api/browse/confirm', async (req, res) => {
-  const { keep = [], cancel = [], bookmarkId, keptFiles = [], browseId } = req.body;
-  const keepSet = new Set(keep.map(String));
-
-  // Resume just the kept tags -- typically a short list, so this is fast.
-  // Deliberately never a blanket "-r -a" (see postConfirmWatches comment:
-  // that was the actual cause of the original over-download bug).
-  runInBatches(keep, tag => dockerExec('mega-transfers', ['-r', String(tag)]).catch(() => {})).catch(() => {});
-  if (keep.length) logActivity('DOWNLOADED', `${keep.length} file(s) selected from folder`, `${cancel.length} skipped`);
-
-  // Cancelling can mean thousands of individual docker exec calls for a huge
-  // folder -- don't make the browser wait on that (this used to leave
-  // "Download Selected" stuck for a long time). A registered watch's own
-  // periodic sweep (every 5s, for the next 5 minutes) cancels everything
-  // under this destination that isn't a kept tag -- which covers both the
-  // explicit cancel list AND any straggler mega-get is still discovering in
-  // the background -- with each sweep cycle naturally retrying anything the
-  // previous one didn't get to, so no separate verify-and-retry pass is
-  // needed here.
+  const { keep = [], bookmarkId, keptFiles = [], browseId } = req.body;
   const session = browseId && browseSessions.get(browseId);
-  if (session) {
-    registerPostConfirmWatch(session.destination, keepSet);
-    browseSessions.delete(browseId);
-  } else if (cancel.length) {
-    // No valid session (e.g. expired) -- fall back to cancelling just the
-    // explicit list, still in the background.
-    runInBatches(cancel.map(String), tag => dockerExec('mega-transfers', ['-c', String(tag)]).catch(() => {})).catch(() => {});
+  if (!session) {
+    // Without the session we don't know which transfers are ours, and the one
+    // thing this code must never do is guess. Nothing was created in list mode,
+    // so nothing leaks; in queue mode the leftovers stay paused and visible in
+    // the table for the user to cancel, which is recoverable -- unlike the old
+    // behaviour of cancelling by destination.
+    return res.status(410).json({ error: 'This folder picker session has expired. Nothing was cancelled — re-open the folder to try again.' });
+  }
+  browseSessions.delete(browseId);
+
+  const keepIds = keep.map(String);
+
+  if (session.mode === 'list') {
+    // Nothing was ever enqueued, so there is nothing to clean up: just fetch the
+    // picked files. -q queues them in the daemon and returns, rather than
+    // holding this request open for the length of the download.
+    const failures = [];
+    await runInBatches(keepIds, async rel => {
+      try {
+        await dockerExec('mega-get', ['-q', '--ignore-quota-warn', `${session.link}/${rel}`, session.destination]);
+      } catch (err) {
+        failures.push({ rel, error: cleanMegaError(err.message) });
+      }
+    }, 8);
+    if (keepIds.length) logActivity('DOWNLOADED', `${keepIds.length - failures.length} file(s) selected from folder`, `${failures.length} failed`);
+    recordBookmarkDownloads(bookmarkId, keptFiles);
+    return res.json({ success: true, started: keepIds.length - failures.length, failures });
   }
 
-  if (bookmarkId && keptFiles.length) {
-    const bookmark = bookmarks.find(b => b.id === bookmarkId);
-    if (bookmark) {
-      bookmark.downloaded = [...new Set([...bookmark.downloaded, ...keptFiles])];
-      saveBookmarks();
-    }
-  }
+  // Queue mode: everything in ownedTags was created by this session and is
+  // currently paused. Resume the picks, cancel the rest. The cancel set is
+  // computed by set difference on tags we created -- never by looking at
+  // filenames or destinations.
+  const keepSet = new Set(keepIds.filter(t => session.ownedTags.has(t)));
+  const toCancel = [...session.ownedTags].filter(t => !keepSet.has(t));
 
-  res.json({ success: true });
+  const resumeFailures = [];
+  await runInBatches([...keepSet], async tag => {
+    try { await dockerExec('mega-transfers', ['-r', String(tag)]); }
+    catch (err) { resumeFailures.push({ tag, error: cleanMegaError(err.message) }); }
+  });
+
+  if (keepSet.size) logActivity('DOWNLOADED', `${keepSet.size} file(s) selected from folder`, `${toCancel.length} skipped`);
+  recordBookmarkDownloads(bookmarkId, keptFiles);
+
+  // Respond before cancelling: a big folder means thousands of single-tag exec
+  // calls (mega-transfers -c takes one tag, no batch syntax) and the button
+  // shouldn't hang on it. Progress is reported via /api/browse/cleanup.
+  res.json({ success: true, started: keepSet.size, cleaning: toCancel.length, failures: resumeFailures });
+
+  cancelTags(toCancel)
+    .then(() => sweepSessionStragglers(session, keepSet))
+    .catch(err => console.error(`[BROWSE] cleanup failed: ${err.message}`));
 });
 
-app.get('/api/browse/watches', (req, res) => {
-  res.json({ watches: postConfirmWatches.map(w => ({ destination: w.destination, keepCount: w.keepTags.size, expiresAt: w.expiresAt })) });
+// mega-get may still be enumerating a very large folder after confirm, adding
+// transfers the picker never showed. Those are ours too, so they get cleaned up
+// -- but on a strict leash: a bounded number of passes, only tags absent from
+// the pre-browse snapshot, and it stops the moment another browse starts (a
+// later session's transfers must never be collateral). Worst case a few extras
+// download and show up in the table; that is a visible, cancellable outcome
+// rather than a silent one.
+const STRAGGLER_PASSES = [5000, 10000, 15000];
+
+async function sweepSessionStragglers(session, keepSet) {
+  for (const delay of STRAGGLER_PASSES) {
+    await sleep(delay);
+    // Stand down if a LATER browse has started -- its transfers are new since
+    // our snapshot too, so we can't tell them from our own stragglers. Keying
+    // on "any session exists" instead would be permanently disarmed by an old
+    // picker left open in a background tab.
+    if ([...browseSessions.values()].some(s => s.createdAt > session.createdAt)) return;
+    let stragglers;
+    try {
+      stragglers = (await snapshotTags())
+        .filter(t => t.tag && !session.existingTags.has(t.tag) && !session.ownedTags.has(t.tag) && !keepSet.has(t.tag))
+        .filter(t => t.filename?.startsWith(session.destination.endsWith('/') ? session.destination : session.destination + '/'))
+        .map(t => t.tag);
+    } catch (err) {
+      console.error(`[BROWSE] straggler pass failed: ${err.message}`);
+      continue;
+    }
+    if (!stragglers.length) continue;
+    console.log(`[BROWSE] cancelling ${stragglers.length} straggler(s) mega-get queued after the picker closed`);
+    stragglers.forEach(t => session.ownedTags.add(t));
+    await cancelTags(stragglers);
+  }
+}
+
+function recordBookmarkDownloads(bookmarkId, keptFiles) {
+  if (!bookmarkId || !keptFiles.length) return;
+  const bookmark = bookmarks.find(b => b.id === bookmarkId);
+  if (!bookmark) return;
+  bookmark.downloaded = [...new Set([...bookmark.downloaded, ...keptFiles])];
+  saveBookmarks();
+}
+
+app.post('/api/browse/dismiss', async (req, res) => {
+  const { browseId } = req.body;
+  const session = browseId && browseSessions.get(browseId);
+  if (!session) return res.json({ success: true, cancelled: 0 });
+  browseSessions.delete(browseId);
+
+  const toCancel = [...session.ownedTags];
+  res.json({ success: true, cancelled: toCancel.length });
+  cancelTags(toCancel)
+    .then(() => sweepSessionStragglers(session, new Set()))
+    .catch(err => console.error(`[BROWSE] dismiss cleanup failed: ${err.message}`));
+});
+
+app.get('/api/browse/cleanup', (req, res) => {
+  res.json({ active: cleanupJobs > 0, total: cleanupTotal, remaining: Math.max(0, cleanupTotal - cleanupDone) });
 });
 
 // ── Bookmark routes ───────────────────────────────────────────────────────────

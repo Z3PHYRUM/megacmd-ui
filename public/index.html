@@ -1175,7 +1175,7 @@
       .then(({ files, browseId }) => {
         currentBrowseId = browseId;
         document.getElementById('browse-loading').style.display = 'none';
-        renderBrowseFiles(files, dest);
+        renderBrowseFiles(files);
         document.getElementById('browse-content').style.display = 'flex';
         document.getElementById('browse-confirm-btn').disabled = false;
         updateBrowseCount();
@@ -1203,23 +1203,23 @@
     if (suggestedParentLink) openFolderPicker(suggestedParentLink, currentBrowseDest);
   }
 
-  function renderBrowseFiles(files, dest) {
-    const prefix = dest.endsWith('/') ? dest : dest + '/';
+  // The server sends each row's id already scoped to how that session must be
+  // confirmed -- a transfer tag when the folder was discovered by enqueueing it,
+  // a path within the link when it was listed directly. The picker just hands
+  // the ids back and never needs to know which.
+  function renderBrowseFiles(files) {
     const downloaded = new Set(currentBookmark?.downloaded || []);
     const rows = files
-      .map(f => {
-        const rel = f.filename.startsWith(prefix) ? f.filename.slice(prefix.length) : f.filename;
-        return { f, rel, isDownloaded: downloaded.has(rel) };
-      })
-      .sort((a, b) => a.rel.localeCompare(b.rel, undefined, { numeric: true, sensitivity: 'base' }));
+      .map(f => ({ f, isDownloaded: downloaded.has(f.rel) }))
+      .sort((a, b) => a.f.rel.localeCompare(b.f.rel, undefined, { numeric: true, sensitivity: 'base' }));
 
-    document.getElementById('browse-tbody').innerHTML = rows.map(({ f, rel, isDownloaded }) => {
+    document.getElementById('browse-tbody').innerHTML = rows.map(({ f, isDownloaded }) => {
       const badge = isDownloaded ? ' <span class="badge complete" style="margin-left:6px">Downloaded</span>' : '';
       return `<tr class="${isDownloaded ? 'browse-row-downloaded' : ''}">
         <td style="padding:7px 6px 7px 11px">
-          <input type="checkbox" class="browse-cb" data-tag="${esc(f.tag)}" data-rel="${esc(rel)}" ${isDownloaded ? '' : 'checked'}>
+          <input type="checkbox" class="browse-cb" data-id="${esc(f.id)}" data-rel="${esc(f.rel)}" ${isDownloaded ? '' : 'checked'}>
         </td>
-        <td class="filename-cell" title="${esc(f.filename)}">${esc(rel)}${badge}</td>
+        <td class="filename-cell" title="${esc(f.rel)}">${esc(f.rel)}${badge}</td>
         <td style="color:var(--muted);white-space:nowrap;font-size:12px">${esc(f.total || '—')}</td>
       </tr>`;
     }).join('');
@@ -1251,26 +1251,31 @@
   }
 
   async function browseConfirm() {
-    const keep = [], cancel = [], keptFiles = [];
-    document.querySelectorAll('.browse-cb').forEach(cb => {
-      if (cb.checked) { keep.push(cb.dataset.tag); keptFiles.push(cb.dataset.rel); }
-      else cancel.push(cb.dataset.tag);
+    const keep = [], keptFiles = [];
+    document.querySelectorAll('.browse-cb:checked').forEach(cb => {
+      keep.push(cb.dataset.id);
+      keptFiles.push(cb.dataset.rel);
     });
     const btn = document.getElementById('browse-confirm-btn');
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner"></span>Starting…';
     try {
-      await apiFetch('/api/browse/confirm', {
+      const { started = keep.length, cleaning = 0, failures = [] } = await apiFetch('/api/browse/confirm', {
         method: 'POST',
-        body: JSON.stringify({ keep, cancel, bookmarkId: currentBookmark?.id, keptFiles, browseId: currentBrowseId }),
+        body: JSON.stringify({ keep, bookmarkId: currentBookmark?.id, keptFiles, browseId: currentBrowseId }),
       });
       if (currentBookmark) {
         currentBookmark.downloaded = [...new Set([...currentBookmark.downloaded, ...keptFiles])];
       }
+      currentBrowseId = null;
       document.getElementById('browse-overlay').classList.add('hidden');
       document.getElementById('links').value = '';
-      toast(`Started ${keep.length} download${keep.length !== 1 ? 's' : ''}`, 'success');
+      toast(`Started ${started} download${started !== 1 ? 's' : ''}${cleaning ? ` — cleaning up ${cleaning} unselected` : ''}`, 'success');
+      // A partial failure used to be invisible: the picks were fired off without
+      // anyone checking whether they actually started.
+      if (failures.length) toast(`${failures.length} file(s) failed to start: ${failures[0].error}`, 'error', 8000);
       loadTransfers();
+      updateCleanupNotice();
     } catch (err) {
       toast(`Error: ${err.message}`, 'error');
     } finally {
@@ -1279,11 +1284,17 @@
     }
   }
 
+  // Closing the picker discards the session. The server cancels only the
+  // transfers that session created — it no longer has any way to express
+  // "cancel everything saving to this folder", which is what previously made
+  // closing the picker poison every later download for five minutes.
   async function browseDismiss() {
-    const tags = [...document.querySelectorAll('.browse-cb')].map(cb => cb.dataset.tag);
-    if (tags.length)
-      await apiFetch('/api/browse/confirm', { method: 'POST', body: JSON.stringify({ keep: [], cancel: tags, browseId: currentBrowseId }) }).catch(() => {});
+    const id = currentBrowseId;
+    currentBrowseId = null;
     document.getElementById('browse-overlay').classList.add('hidden');
+    if (!id) return;
+    await apiFetch('/api/browse/dismiss', { method: 'POST', body: JSON.stringify({ browseId: id }) }).catch(() => {});
+    updateCleanupNotice();
   }
 
   // ── Bookmarks ─────────────────────────────────────────────────────────────────
@@ -1743,23 +1754,17 @@
   // Folder-picker confirms that deselect a lot of a huge folder clean up in
   // the background rather than blocking the UI (see /api/browse/confirm) --
   // without this, a big leftover PAUSED batch looks indistinguishable from
-  // something stuck rather than something in progress.
+  // something stuck rather than something in progress. The count is the
+  // server's real progress through its own cancel list, not an inference drawn
+  // from which transfers happen to be paused under the destination.
   async function updateCleanupNotice() {
     const el = document.getElementById('cleanup-notice');
     try {
-      const { watches } = await apiFetch('/api/browse/watches');
-      if (!watches.length) { el.classList.add('hidden'); return; }
-      let remaining = 0;
-      for (const w of watches) {
-        const prefix = w.destination.endsWith('/') ? w.destination : w.destination + '/';
-        remaining += currentTransfers.filter(t => t.status === 'paused' && t.filename?.startsWith(prefix)).length;
-      }
-      if (remaining > 0) {
-        el.textContent = `🧹 Cleaning up ~${remaining} leftover transfer${remaining !== 1 ? 's' : ''} from a recent folder selection — this can take a few minutes for a large folder.`;
-        el.classList.remove('hidden');
-      } else {
-        el.classList.add('hidden');
-      }
+      const { active, total, remaining } = await apiFetch('/api/browse/cleanup');
+      if (!active) { el.classList.add('hidden'); return; }
+      const done = total - remaining;
+      el.textContent = `🧹 Cleaning up ${done} of ${total} unselected transfer${total !== 1 ? 's' : ''} from a folder selection — this can take a few minutes for a large folder.`;
+      el.classList.remove('hidden');
     } catch {
       el.classList.add('hidden');
     }
