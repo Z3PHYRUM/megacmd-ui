@@ -917,6 +917,30 @@ if (retryQueue.some(q => q.status === 'pending')) scheduleRetry();
 let queuesWereBusy = false;
 const ALL_FINISHED_POLL_MS = 15000;
 
+// "Download complete" used to be fired from /api/download, which could only
+// report it because it blocked until the download finished. Now that downloads
+// are handed to the daemon and the request returns, completion is observed here
+// instead -- which also means folder-picker downloads finally get a completion
+// notification, having never had one (they were never awaited by anything).
+const notifiedCompleteFiles = new Set();
+
+function noteCompletedTransfers(transfers) {
+  const present = new Set();
+  for (const t of transfers) {
+    if (!t.filename) continue;
+    present.add(t.filename);
+    if (t.status !== 'complete' || notifiedCompleteFiles.has(t.filename)) continue;
+    notifiedCompleteFiles.add(t.filename);
+    logActivity('DOWNLOADED', basename(t.filename), t.filename);
+    notify('mega_completed', 'MEGAcmd', `Download complete: ${basename(t.filename)}`);
+  }
+  // Forget rows that have left the table, so re-downloading the same file later
+  // still notifies rather than being suppressed by a stale entry.
+  for (const filename of notifiedCompleteFiles) {
+    if (!present.has(filename)) notifiedCompleteFiles.delete(filename);
+  }
+}
+
 async function checkAllQueuesFinished() {
   let busy = retryQueue.length > 0
     || ytJobs.some(j => !['complete', 'error', 'cancelled'].includes(j.status));
@@ -929,6 +953,7 @@ async function checkAllQueuesFinished() {
     const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
     const transfers = parseTransfers(raw);
     transferStallMs(transfers);
+    noteCompletedTransfers(transfers);
     if (transfers.some(t => !['complete', 'error'].includes(t.status))) busy = true;
   } catch {}
 
@@ -989,19 +1014,29 @@ app.post('/api/download', async (req, res) => {
     if (!link) continue;
     notify('mega_queued', 'MEGAcmd', `Queued: ${link}`);
     try {
-      await dockerExec('mega-get', ['--ignore-quota-warn', link, destination]);
-      logActivity('DOWNLOADED', link, destination);
-      notify('mega_completed', 'MEGAcmd', `Download complete: ${link}`);
+      // -q hands the download to the daemon and returns. Without it this awaited
+      // mega-get to *completion* -- and mega-get is the one command with no exec
+      // timeout, because a real download legitimately runs for hours. So a 4 GB
+      // movie held this HTTP request open for hours: the Download button sat on
+      // "Queuing…" until the browser gave up, and the queue looked broken while
+      // the transfer was in fact fine. The transfer table is where progress
+      // belongs; this endpoint's job is only to hand the link over.
+      await dockerExec('mega-get', ['-q', '--ignore-quota-warn', link, destination], { timeoutMs: 20000 });
+      logActivity('QUEUED', link, destination);
       results.push({ link, success: true });
     } catch (err) {
       const error = cleanMegaError(err.message);
       const quotaExceeded = /bandwidth quota/i.test(err.message);
       if (!quotaExceeded) notify('mega_failed', 'MEGAcmd', `Download failed: ${link}`, { priority: 'high' });
+      logActivity('FAILED', link, error);
       results.push({ link, success: false, error, quotaExceeded });
     }
   }
 
-  // Auto-add quota-blocked links to the retry queue
+  // Only reachable if mega-get rejected the link outright. A quota refusal now
+  // usually happens after the handover instead, and MEGAcmd retries it natively
+  // (that's what the RETRYING state in the transfer table is) rather than it
+  // coming back here -- so this path fires far more rarely than it used to.
   const quotaLinks = results.filter(r => r.quotaExceeded).map(r => r.link);
   if (quotaLinks.length) addToQueue(quotaLinks, destination, { silent: true });
 

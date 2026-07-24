@@ -1121,7 +1121,8 @@
       const ok    = results.filter(r => r.success);
       const quota = results.filter(r => r.quotaExceeded);
       const bad   = results.filter(r => !r.success && !r.quotaExceeded);
-      if (ok.length) toast(`Queued ${ok.length} download${ok.length > 1 ? 's' : ''}`, 'success');
+      if (ok.length) toast(`Queued ${ok.length} download${ok.length > 1 ? 's' : ''} — track progress in the table below`, 'success');
+      loadTransfers();
       if (quota.length) {
         toast(`${quota.length} link${quota.length > 1 ? 's' : ''} added to retry queue (quota exceeded)`, 'warn', 6000);
         loadQueue();
