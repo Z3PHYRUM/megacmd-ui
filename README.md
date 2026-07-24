@@ -161,6 +161,20 @@ The parser reads the header row dynamically, so as long as the columns include T
 
 Check the link for extra text after the key, like `https://mega.nz/folder/XXXX#YYYY/folder/ZZZZ`. That's what the MEGA web app shows in the address bar when you've navigated *into* a subfolder of a shared folder — it looks like a link to just that subfolder, but `mega-get` doesn't understand the suffix and silently ignores it, downloading the entire top-level shared folder instead. The app now detects this link shape before it can happen and offers a "Browse Parent Folder Instead" button in the picker's error message — it resubmits with just the base link (stripped back to the key) and discovers the whole parent folder, which you can then narrow down with the picker's filter box. This is usually the only option: if you don't own the shared folder, MEGA generally won't let you generate your own link scoped to an arbitrary subfolder within someone else's share either.
 
+### Everything stuck at QUEUED, and `ps` shows old `mega-get` processes still alive
+
+MEGAcmd needs a public-folder-link context to read a folder link, and only one can be held at a time (*"You can only log into one entity at a time"*). Two concurrent folder-link `mega-get` calls deadlock: both client processes stay alive indefinitely, both log `(0/0 KB: 0.00 %)` — neither ever resolves the folder's size — and every transfer they queued sits at `QUEUED` forever behind them. A single folder link on its own completes fine.
+
+The app now serialises folder discovery so it can't create this, but if you're already in the state, nothing new will work until the hung clients are gone:
+
+```bash
+docker exec megacmd ps aux | grep mega-get     # any long-lived ones = stuck
+docker exec megacmd mega-transfers -c -a       # the queued transfers are orphans
+docker restart megacmd                         # clears the hung clients
+```
+
+Symptoms that distinguish this from quota: no error anywhere (not in `docker logs megacmd`, not from `mega-get`), `0/0 KB` rather than a real size, and `mega-get` processes with a start time well in the past at 0% CPU.
+
 ### Transfers sit at QUEUED / RETRYING and never start
 
 Two different causes, and the UI now distinguishes them:

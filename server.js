@@ -1248,6 +1248,28 @@ async function snapshotTags() {
   return parseTransfers(raw);
 }
 
+// Folder-link discovery runs strictly one at a time.
+//
+// MEGAcmd needs a public-folder-link context to read a folder link, and only
+// one can be held at a time ("You can only log into one entity at a time" --
+// UserGuide, on login). Two concurrent folder-link `mega-get` calls were found
+// deadlocked on the live system: both client processes still alive a day later,
+// both logging "(0/0 KB: 0.00 %)" -- neither had even resolved the folder's
+// size -- and every transfer they had queued stuck at QUEUED forever behind
+// them. A single folder link on its own completes fine, so contention for that
+// one context is the difference.
+//
+// Serialising here means a second browse waits its turn instead of becoming the
+// second contender. Queuing behind a slow browse is a delay; deadlocking is a
+// dead queue that needs a container restart to clear.
+let discoveryChain = Promise.resolve();
+
+function serializeDiscovery(fn) {
+  const result = discoveryChain.then(fn, fn);
+  discoveryChain = result.then(() => {}, () => {});
+  return result;
+}
+
 async function discoverByEnqueueing(link, destination, session) {
   // -q is MEGAcmd's own "queue this and return" flag. This used to background
   // the client with a shell `&` instead, which is worse in three ways: the sh
@@ -1310,13 +1332,22 @@ app.post('/api/browse', async (req, res) => {
     createdAt: Date.now(),
   };
 
-  // Preferred path: a real listing. Costs nothing and creates no transfers.
-  const listed = await tryListFolderLink(cleanLink);
+  // Both discovery paths need MEGAcmd's public-folder-link context (mega-ls to
+  // read the link, mega-get to enqueue it), and only one of those can be held at
+  // a time -- so the lock covers the whole phase, not just the enqueue. Taking
+  // it twice per browse would let one browse's listing overlap another's
+  // enqueue, which is the same contention with extra steps.
   let files;
+  let failure = null;
 
-  if (listed) {
-    files = listed.map(f => ({ id: f.rel, rel: f.rel, total: f.size ? formatBytes(f.size) : '' }));
-  } else {
+  await serializeDiscovery(async () => {
+    // Preferred path: a real listing. Costs nothing and creates no transfers.
+    const listed = await tryListFolderLink(cleanLink);
+    if (listed) {
+      files = listed.map(f => ({ id: f.rel, rel: f.rel, total: f.size ? formatBytes(f.size) : '' }));
+      return;
+    }
+
     session.mode = 'queue';
     try {
       const snapshot = await snapshotTags();
@@ -1324,23 +1355,27 @@ app.post('/api/browse', async (req, res) => {
     } catch (err) {
       // Proceeding blind would let cleanup mistake a pre-existing transfer for
       // one of ours, so refuse rather than risk cancelling someone's download.
-      return res.status(500).json({ error: `Couldn't read the current transfer list, so the folder picker can't safely tell its own transfers apart from existing ones: ${cleanMegaError(err.message)}` });
+      failure = { status: 500, error: `Couldn't read the current transfer list, so the folder picker can't safely tell its own transfers apart from existing ones: ${cleanMegaError(err.message)}` };
+      return;
     }
 
     let discovered;
     try {
       discovered = await discoverByEnqueueing(cleanLink, destination, session);
     } catch (err) {
-      return res.status(500).json({ error: cleanMegaError(err.message) });
+      failure = { status: 500, error: cleanMegaError(err.message) };
+      return;
     }
 
     if (!discovered.length) {
       // Cancel anything we did manage to create before giving up, so a failed
       // browse never leaves transfers behind.
       if (session.ownedTags.size) await cancelTags([...session.ownedTags]);
-      return res.status(500).json({
+      failure = {
+        status: 500,
         error: `MEGAcmd accepted the link without error but no files appeared within ${BROWSE_DISCOVERY_TIMEOUT_MS / 1000}s. The folder may be empty, or enumeration may be slower than the timeout — try again.`,
-      });
+      };
+      return;
     }
 
     const prefix = destination.endsWith('/') ? destination : destination + '/';
@@ -1349,7 +1384,9 @@ app.post('/api/browse', async (req, res) => {
       rel: t.filename.startsWith(prefix) ? t.filename.slice(prefix.length) : t.filename,
       total: t.total || '',
     }));
-  }
+  });
+
+  if (failure) return res.status(failure.status).json({ error: failure.error });
 
   browseSessions.set(session.id, session);
   logActivity('BROWSE', cleanLink, `${files.length} file(s) found via ${session.mode === 'list' ? 'mega-ls' : 'queue discovery'}`);

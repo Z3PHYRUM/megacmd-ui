@@ -1,6 +1,6 @@
 {
   "name": "megacmd-ui",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Web UI for MEGAcmd",
   "main": "server.js",
   "scripts": {
