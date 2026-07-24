@@ -148,7 +148,7 @@ function applyMockAction(flag, tagArg) {
 // anyway, and falling back costs correctness nothing.
 const EXEC_TIMEOUT = { default: 10000, 'mega-get': 0, 'mega-transfers': 45000, 'mega-ls': 20000 };  // 0 = no timeout
 
-function dockerExec(megaCommand, args = []) {
+function dockerExec(megaCommand, args = [], opts = {}) {
   if (MOCK) {
     console.log(`[MOCK] ${megaCommand} ${args.join(' ')}`);
     if (megaCommand === 'mega-whoami') return Promise.resolve('user@example.com');
@@ -156,7 +156,28 @@ function dockerExec(megaCommand, args = []) {
       // Real callers pass flags first (-q, --ignore-quota-warn), so take the
       // first non-flag argument as the link -- otherwise mock rows come out
       // named "--ignore-quota-warn".
-      const link = args.find(a => !a.startsWith('-')) || '';
+      const nonFlags = args.filter(a => !a.startsWith('-'));
+      const link = nonFlags[0] || '';
+      const destination = nonFlags[1] || '/downloads/';
+
+      // A folder link enqueues the whole folder, which is how the picker
+      // discovers its contents. "bigfolder" simulates a folder with more files
+      // than TRANSFER_LIMIT, for testing that discovery and cleanup don't
+      // silently stop working past the display cap.
+      if (/\/folder\//i.test(link)) {
+        const prefix = destination.endsWith('/') ? destination : destination + '/';
+        const fileCount = /bigfolder/i.test(link) ? 4682 : 4;
+        for (let i = 0; i < fileCount; i++) {
+          mockTransfers.push({
+            tag: String(Date.now() + i).slice(-6),
+            type: '⇓',
+            filename: `${prefix}mock-folder/file-${i + 1}.bin`,
+            transferred: '0 B', total: `${(i + 1) * 10} MB`, speed: '0 B/s', progress: '0 %', state: 'queued',
+          });
+        }
+        return Promise.resolve('');
+      }
+
       mockTransfers.push({
         tag: String(Date.now()).slice(-4),
         type: '⇓',
@@ -176,27 +197,6 @@ function dockerExec(megaCommand, args = []) {
     // exercises the queue-based discovery fallback (which the mock does model)
     // rather than a listing path it can't meaningfully fake.
     if (megaCommand === 'mega-ls') return Promise.reject(new Error("Couldn't find (mock)"));
-    // Simulates /api/browse's backgrounded "mega-get ... &" folder-discovery trick
-    // (args: -c, script, sh, link, destination) so the folder picker is testable
-    // without a real MEGAcmd container.
-    if (megaCommand === '/bin/sh' && (args[1] || '').startsWith('mega-get')) {
-      const link = args[3] || '';
-      const destination = args[4] || '/downloads/';
-      const prefix = destination.endsWith('/') ? destination : destination + '/';
-      // "bigfolder" in the link simulates a folder with more files than
-      // TRANSFER_LIMIT, for testing that discovery/cleanup logic doesn't
-      // silently stop working past the display cap.
-      const fileCount = /bigfolder/i.test(link) ? 4682 : /\/folder\//i.test(link) ? 4 : 1;
-      for (let i = 0; i < fileCount; i++) {
-        mockTransfers.push({
-          tag: String(Date.now() + i).slice(-6),
-          type: '⇓',
-          filename: `${prefix}mock-folder/file-${i + 1}.bin`,
-          transferred: '0 B', total: `${(i + 1) * 10} MB`, speed: '0 B/s', progress: '0 %', state: 'queued',
-        });
-      }
-      return Promise.resolve('');
-    }
     return Promise.resolve('');
   }
 
@@ -211,7 +211,10 @@ function dockerExec(megaCommand, args = []) {
           if (err) return reject(err);
 
           let stdout = '', stderr = '';
-          const timeoutMs = EXEC_TIMEOUT[megaCommand] ?? EXEC_TIMEOUT.default;
+          // Per-call override matters for mega-get: it defaults to no timeout
+          // (a real download runs as long as it runs), but the folder picker's
+          // queue-and-return call must not be allowed to hang the browse.
+          const timeoutMs = opts.timeoutMs ?? (EXEC_TIMEOUT[megaCommand] ?? EXEC_TIMEOUT.default);
           const timer = timeoutMs
             ? setTimeout(() => { stream.destroy(); reject(new Error(`Command timed out: ${megaCommand}`)); }, timeoutMs)
             : null;
@@ -1246,16 +1249,15 @@ async function snapshotTags() {
 }
 
 async function discoverByEnqueueing(link, destination, session) {
-  // Capture mega-get's own stderr instead of discarding it. Discarding it is why
-  // a failure here could only be reported as a guess ("quota exceeded, link
-  // invalid, or folder is empty") -- the real reason had already been thrown
-  // away. $1/$2/$3 positional params avoid shell injection.
-  const logPath = `/tmp/megacmd-ui-browse-${session.id}.log`;
-  await dockerExec('/bin/sh', [
-    '-c', 'mega-get --ignore-quota-warn "$1" "$2" > "$3" 2>&1 &',
-    'sh', link, destination, logPath,
-  ]);
-  session.logPath = logPath;
+  // -q is MEGAcmd's own "queue this and return" flag. This used to background
+  // the client with a shell `&` instead, which is worse in three ways: the sh
+  // wrapper exits immediately, so Docker tears down the exec session and can
+  // kill mega-get mid-enumeration, leaving transfers queued against a client
+  // that no longer exists; the exit code was unobservable; and stderr had to be
+  // redirected to a file in the container and read back later, so an error like
+  // a quota refusal only surfaced after discovery had already timed out.
+  // Running it in the foreground with -q gives us the failure immediately.
+  await dockerExec('mega-get', ['-q', '--ignore-quota-warn', link, destination], { timeoutMs: 20000 });
 
   // Poll until the count stabilises across two consecutive polls, pausing each
   // newly-seen transfer immediately so nothing downloads before it's picked.
@@ -1278,13 +1280,6 @@ async function discoverByEnqueueing(link, destination, session) {
     }
   }
   return found;
-}
-
-// What mega-get actually said, for when discovery came up empty.
-async function readBrowseLog(session) {
-  if (!session.logPath) return '';
-  try { return (await dockerExec('/bin/cat', [session.logPath])).trim(); }
-  catch { return ''; }
 }
 
 app.post('/api/browse', async (req, res) => {
@@ -1343,11 +1338,8 @@ app.post('/api/browse', async (req, res) => {
       // Cancel anything we did manage to create before giving up, so a failed
       // browse never leaves transfers behind.
       if (session.ownedTags.size) await cancelTags([...session.ownedTags]);
-      const megaSaid = await readBrowseLog(session);
       return res.status(500).json({
-        error: megaSaid
-          ? cleanMegaError(megaSaid)
-          : `MEGAcmd accepted the link but no files appeared within ${BROWSE_DISCOVERY_TIMEOUT_MS / 1000}s. The folder may be empty, or enumeration may be slower than the timeout — try again.`,
+        error: `MEGAcmd accepted the link without error but no files appeared within ${BROWSE_DISCOVERY_TIMEOUT_MS / 1000}s. The folder may be empty, or enumeration may be slower than the timeout — try again.`,
       });
     }
 
