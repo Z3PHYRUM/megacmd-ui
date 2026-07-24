@@ -661,6 +661,31 @@ function detectGlobalPause(raw) {
   return parseTransferNotices(raw).some(n => /\bpaused\b/i.test(n));
 }
 
+// MEGAcmd exposes no way to ask about transfer/bandwidth quota. Confirmed
+// against the UserGuide: `whoami -l` reports storage, Pro level and sessions;
+// `df` reports storage only; nothing reports transfer allowance. Quota becomes
+// visible only when a transfer actually attempts and is refused, and a refused
+// transfer just sits in RETRYING or QUEUED without surfacing a reason.
+//
+// So a stalled queue is a state this app cannot explain by asking. What it can
+// do is notice it -- transfers waiting, none running, for long enough that it
+// isn't ordinary scheduling -- and say so, naming the likeliest cause as a
+// likelihood rather than presenting a guess as a diagnosis. Silence was the
+// worst option: a screen of QUEUED rows at 0% reads as the app being broken.
+const ACTIVE_STATUSES  = ['downloading', 'uploading'];
+const WAITING_STATUSES = ['queued', 'retrying'];
+let lastActiveTransferAt = Date.now();
+
+function transferStallMs(transfers) {
+  const active  = transfers.some(t => ACTIVE_STATUSES.includes(t.status));
+  const waiting = transfers.some(t => WAITING_STATUSES.includes(t.status));
+  if (active || !waiting) {
+    lastActiveTransferAt = Date.now();
+    return 0;
+  }
+  return Date.now() - lastActiveTransferAt;
+}
+
 function parsePipeTransfers(raw) {
   // Keep only pipe rows; banners are read separately by parseTransferNotices.
   const lines = raw.split('\n').map(l => l.trim()).filter(l => l && l.includes('|'));
@@ -893,12 +918,16 @@ async function checkAllQueuesFinished() {
   let busy = retryQueue.length > 0
     || ytJobs.some(j => !['complete', 'error', 'cancelled'].includes(j.status));
 
-  if (!busy) {
-    try {
-      const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
-      if (parseTransfers(raw).some(t => !['complete', 'error'].includes(t.status))) busy = true;
-    } catch {}
-  }
+  // Queried unconditionally rather than only when nothing else is busy, so the
+  // stall timer keeps ticking accurately with the UI closed. Otherwise reopening
+  // the tab after an idle hour would measure the stall from the last poll and
+  // claim an hour-long stall it never actually observed.
+  try {
+    const raw = await dockerExec('mega-transfers', [`--limit=${TRANSFER_SAFETY_LIMIT}`, '--col-separator=|']);
+    const transfers = parseTransfers(raw);
+    transferStallMs(transfers);
+    if (transfers.some(t => !['complete', 'error'].includes(t.status))) busy = true;
+  } catch {}
 
   if (!busy) {
     try {
@@ -931,9 +960,9 @@ app.get('/api/status', async (req, res) => {
   try {
     const whoami = await dockerExec('mega-whoami');
     const text = whoami.trim();
-    res.json({ loggedIn: text.length > 0 && !/not logged/i.test(text), whoami: text, version: APP_VERSION });
+    res.json({ loggedIn: text.length > 0 && !/not logged/i.test(text), whoami: text, version: APP_VERSION, container: MEGACMD_CONTAINER });
   } catch (err) {
-    res.json({ loggedIn: false, whoami: err.message, version: APP_VERSION });
+    res.json({ loggedIn: false, whoami: err.message, version: APP_VERSION, container: MEGACMD_CONTAINER });
   }
 });
 
@@ -985,9 +1014,10 @@ app.get('/api/transfers', async (req, res) => {
       truncated: transfers.length >= TRANSFER_LIMIT,
       globallyPaused: detectGlobalPause(raw),
       notices: parseTransferNotices(raw),
+      stalledMs: transferStallMs(transfers),
     });
   } catch (err) {
-    res.status(500).json({ error: err.message, transfers: [], truncated: false, globallyPaused: false, notices: [] });
+    res.status(500).json({ error: err.message, transfers: [], truncated: false, globallyPaused: false, notices: [], stalledMs: 0 });
   }
 });
 

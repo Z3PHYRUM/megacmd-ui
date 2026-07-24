@@ -829,6 +829,7 @@
         per-transfer one, so the per-row Resume buttons won't clear it.
         <button class="sm" id="global-resume-btn" style="margin-left:8px">Resume MEGAcmd</button>
       </div>
+      <div class="pause-warn hidden" id="stall-warn"></div>
       <div class="truncation-warn hidden" id="cleanup-notice"></div>
       <div class="truncation-warn hidden" id="truncation-warn">
         ⚠ Showing 1000 transfers — list may be truncated. Cancel or clear completed transfers to see all.
@@ -990,11 +991,13 @@
   // ── Status bar ──────────────────────────────────────────────────────────────
   async function checkStatus() {
     try {
-      const { loggedIn, whoami, version } = await apiFetch('/api/status');
+      const { loggedIn, whoami, version, container } = await apiFetch('/api/status');
       document.getElementById('status-dot').className = `dot ${loggedIn ? 'online' : 'offline'}`;
       document.getElementById('status-text').textContent = loggedIn
         ? `Logged in as ${whoami}` : `Not logged in — ${whoami}`;
       if (version) document.getElementById('version-text').textContent = `v${version}`;
+      // Used so the diagnostic commands the UI suggests name the real container.
+      if (container) window.__megacmdContainer = container;
     } catch {
       document.getElementById('status-dot').className = 'dot offline';
       document.getElementById('status-text').textContent = 'MEGAcmd unreachable';
@@ -1772,9 +1775,10 @@
 
   async function loadTransfers() {
     try {
-      const { transfers, truncated, globallyPaused } = await apiFetch('/api/transfers');
+      const { transfers, truncated, globallyPaused, stalledMs } = await apiFetch('/api/transfers');
       renderTransfers(transfers);
       document.getElementById('global-pause-warn').classList.toggle('hidden', !globallyPaused);
+      renderStallWarning(stalledMs, globallyPaused, transfers);
       document.getElementById('truncation-warn').classList.toggle('hidden', !truncated);
       document.getElementById('refresh-hint').textContent =
         `Last updated: ${new Date().toLocaleTimeString()} · Auto-refreshes every 5 seconds`;
@@ -1783,6 +1787,32 @@
       document.getElementById('tbody').innerHTML =
         `<tr><td colspan="5" class="empty">Error: ${esc(err.message)}</td></tr>`;
     }
+  }
+
+  // A queue with things waiting and nothing running is the state that reads as
+  // "the app is broken" when it's usually MEGA's transfer quota. MEGAcmd can't
+  // be asked about quota (see transferStallMs in server.js), so this reports
+  // the observation and names the likely cause as likely — it deliberately
+  // doesn't assert a diagnosis it has no way to verify.
+  const STALL_WARN_AFTER_MS = 2 * 60 * 1000;
+
+  function renderStallWarning(stalledMs, globallyPaused, transfers) {
+    const el = document.getElementById('stall-warn');
+    // A global pause explains the stall on its own and has its own banner.
+    if (globallyPaused || !stalledMs || stalledMs < STALL_WARN_AFTER_MS) {
+      el.classList.add('hidden');
+      return;
+    }
+    const mins    = Math.round(stalledMs / 60000);
+    const waiting = transfers.filter(t => ['queued', 'retrying'].includes(t.status)).length;
+    const retrying = transfers.filter(t => t.status === 'retrying').length;
+    el.innerHTML = `⏳ <strong>${waiting} transfer${waiting !== 1 ? 's' : ''} waiting, none running for ~${mins} min.</strong>
+      MEGA's transfer quota is the usual reason${retrying ? ` (a transfer sitting in <em>retrying</em> normally means it was refused and is backing off)` : ''} —
+      it's a rolling allowance that frees up on its own, so this often clears without you doing anything.
+      MEGAcmd provides no way to query quota, so this can't be confirmed from here. To check, run a download
+      in the foreground where the error is visible:
+      <code style="display:block;margin-top:6px;opacity:.85">docker exec ${esc(window.__megacmdContainer || 'megacmd')} mega-get --ignore-quota-warn "&lt;a mega link&gt;" /downloads/</code>`;
+    el.classList.remove('hidden');
   }
 
   // Folder-picker confirms that deselect a lot of a huge folder clean up in

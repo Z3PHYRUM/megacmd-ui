@@ -161,6 +161,27 @@ The parser reads the header row dynamically, so as long as the columns include T
 
 Check the link for extra text after the key, like `https://mega.nz/folder/XXXX#YYYY/folder/ZZZZ`. That's what the MEGA web app shows in the address bar when you've navigated *into* a subfolder of a shared folder — it looks like a link to just that subfolder, but `mega-get` doesn't understand the suffix and silently ignores it, downloading the entire top-level shared folder instead. The app now detects this link shape before it can happen and offers a "Browse Parent Folder Instead" button in the picker's error message — it resubmits with just the base link (stripped back to the key) and discovers the whole parent folder, which you can then narrow down with the picker's filter box. This is usually the only option: if you don't own the shared folder, MEGA generally won't let you generate your own link scoped to an arbitrary subfolder within someone else's share either.
 
+### Transfers sit at QUEUED / RETRYING and never start
+
+Two different causes, and the UI now distinguishes them:
+
+**A MEGAcmd-wide pause.** `mega-transfers` prints a `DOWNLOADS AND UPLOADS ARE PAUSED` banner above the table when this is set. It's a global setting, so the per-row Resume buttons can't clear it — only `-r -a` can. A red banner with a **Resume MEGAcmd** button appears when this state is detected. (Earlier versions of this app issued `mega-transfers -p -a` from the folder picker, so it could create this state itself.) To check by hand:
+
+```bash
+docker exec megacmd mega-transfers --limit=3 --col-separator='|'   # look at line 1
+docker exec megacmd mega-transfers -r -a
+```
+
+**MEGA transfer quota.** Far more common, and the awkward one: **MEGAcmd provides no way to query transfer/bandwidth quota.** `whoami -l` reports storage, Pro level and sessions; `df` reports storage only; nothing reports transfer allowance. A quota-refused transfer just sits in `RETRYING` (backing off) or `QUEUED` without surfacing a reason anywhere.
+
+So the app can't diagnose it — but it does detect the *shape* of it. When transfers are waiting and none have been running for over two minutes, a notice appears saying so, naming quota as the likely cause without asserting it. Quota is a rolling allowance, so this usually clears on its own. To confirm it, run a download in the foreground where the error is actually visible:
+
+```bash
+docker exec megacmd mega-get --ignore-quota-warn "<a mega link>" /downloads/
+```
+
+A bandwidth/quota message there is definitive. If it downloads fine instead, the account is fine and something is blocking the queue — try cancelling the `RETRYING` transfer, in case it's holding a slot the others are waiting on.
+
 ### "Write error", or the folder picker reports an empty folder for a link you know is good
 
 MEGAcmd runs inside the **`megacmd`** container, so the destination has to exist and be writable *there*. It's easy to have the downloads volume mounted on `megacmd-ui` (which is what the Destination "Browse…" picker lists from) but not on `megacmd`, or mounted read-only, or owned by a UID MEGAcmd isn't running as.
